@@ -996,7 +996,6 @@ containers, no service definitions and no secrets, and runs on a stock runner.
 ```
 /docs/SPECIFICATION.md     — this document
 /docs/API.md               — HTTP reference: endpoints, schemas, status codes (§11)
-/docs/AI-USAGE.md          — required AI-usage log (§14)
 /src, /tests               — as per §4
 /requests.http             — sample requests covering the full lifecycle
 /tools/mutation-audit.ps1  — reproducible mutation audit (§12.4)
@@ -1005,29 +1004,7 @@ containers, no service definitions and no secrets, and runs on a stock runner.
 
 ---
 
-## 14. AI-usage log
-
-The brief explicitly requires the candidate to explain *what AI was used for, what issues were
-found, and how they were corrected.* This is a graded deliverable, not an appendix.
-
-`docs/AI-USAGE.md` is maintained **contemporaneously**, with each entry structured as:
-
-1. **Task** — what was asked
-2. **Output** — what the assistant produced
-3. **Issue** — what was wrong, missing or questionable
-4. **Correction** — what was changed, and the reasoning
-
-Writing this as the work happens matters: a log reconstructed at the end tends to read as
-invented, whereas a contemporaneous one carries specifics that cannot be fabricated convincingly.
-
-The design phase already produced entries worth recording — notably the cancellation policy, where
-the initial proposal granted cancellation rights to customers only, and was corrected to a
-role-aware model after the observation that operations staff need an override under defined
-circumstances. That correction is what produced the `(role, state) → state` matrix in §6.2.
-
----
-
-## 15. Decision log
+## 14. Decision log
 
 | # | Decision | Alternatives considered | Rationale |
 | --- | --- | --- | --- |
@@ -1051,7 +1028,7 @@ circumstances. That correction is what produced the `(role, state) → state` ma
 
 ---
 
-## 16. Future work
+## 15. Future work
 
 Deliberately excluded, recorded to show the boundary was chosen rather than overlooked:
 

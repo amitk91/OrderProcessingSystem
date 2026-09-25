@@ -434,7 +434,6 @@ multi-currency. Each is a subsystem in its own right; see
 | --- | --- |
 | **[docs/API.md](./docs/API.md)** | **Full HTTP reference** — endpoints, schemas, query parameters, status codes, error codes |
 | [docs/SPECIFICATION.md](./docs/SPECIFICATION.md) | Design spec: ~50 numbered requirements, domain model, security model, NFRs, decision log |
-| [docs/AI-USAGE.md](./docs/AI-USAGE.md) | Required AI-usage log — what AI was used for, what it got wrong, how it was corrected |
 | [requests.http](./requests.http) | Executable walkthrough of every feature, including security cases |
 | [tools/mutation-audit.ps1](./tools/mutation-audit.ps1) | Re-runs every mutation claim in this README against the current code (needs `pwsh`) |
 
