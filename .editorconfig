@@ -387,3 +387,13 @@ dotnet_naming_style.s_camelcase.required_suffix =
 dotnet_naming_style.s_camelcase.word_separator = 
 dotnet_naming_style.s_camelcase.capitalization = camel_case
 
+
+# EF Core migrations are generated code. Regenerating them would discard any manual
+# edit, so analyzer rules that demand hand-tuning are scoped off here rather than
+# fought file-by-file. Correctness rules stay enabled.
+[**/Persistence/Migrations/*.cs]
+dotnet_diagnostic.CA1861.severity = none
+dotnet_diagnostic.CA1814.severity = none
+dotnet_diagnostic.IDE0300.severity = none
+dotnet_diagnostic.IDE0301.severity = none
+generated_code = true

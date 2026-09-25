@@ -7,8 +7,11 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <!-- Test method names use underscores by convention; xUnit1041 fixture-arg rule is noisy. -->
-    <NoWarn>$(NoWarn);CA1707;CA2007;xUnit1041</NoWarn>
+    <!-- CA1707: test method names use underscores for readability.
+         CA2007: ConfigureAwait is not needed; tests have no synchronization context.
+         CA1711: xUnit collection definitions conventionally end in "Collection".
+         xUnit1041: fixture-constructor-argument rule is noisy with collection fixtures. -->
+    <NoWarn>$(NoWarn);CA1707;CA2007;CA1711;xUnit1041</NoWarn>
   </PropertyGroup>
 
 </Project>

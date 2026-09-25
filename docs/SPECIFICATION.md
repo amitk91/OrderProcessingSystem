@@ -326,8 +326,16 @@ Skip-transitions (e.g. `PENDING → SHIPPED`) are rejected. Backward transitions
 
 | Actor | `PENDING` | `PROCESSING` | `SHIPPED` | `DELIVERED` | `CANCELLED` |
 | --- | --- | --- | --- | --- | --- |
-| **Customer** | ✅ Allowed | ❌ `409` — already being fulfilled | ❌ `409` | ❌ `409` | ❌ `409` |
-| **Admin** | ✅ Allowed | ✅ Allowed (reason required) | ❌ `409` — returns flow | ❌ `409` | ❌ `409` |
+| **Customer** | ✅ Allowed | ❌ `409` — already being fulfilled | ❌ `409` | ❌ `409` | ⟳ `200` no-op |
+| **Admin** | ✅ Allowed | ✅ Allowed (reason required) | ❌ `409` — returns flow | ❌ `409` | ⟳ `200` no-op |
+
+**Why re-cancelling is a no-op rather than a conflict.** Cancelling an order that is already
+cancelled requests a state the system is already in, so there is nothing to reject. Returning
+`200` makes the endpoint safe to retry — a double-tapped button or a client retrying after a
+network timeout succeeds instead of surfacing a spurious error. The original `CancelledBy`,
+`CancellationReason` and `CancelledAt` are never overwritten, so the protection that matters is
+preserved. This is the same rule as FR-3.5 applied consistently rather than a special case for
+cancellation.
 
 **Rationale for the admin override.** The brief only grants cancellation to customers in
 `PENDING`. In practice, operations staff must be able to cancel an in-flight order — fraud
@@ -396,7 +404,7 @@ Each requirement is phrased to be directly testable.
 | FR-3.2 | The transition is validated against the matrix in §6.2 |
 | FR-3.3 | An illegal transition returns `409` with the attempted and permitted transitions |
 | FR-3.4 | A successful transition writes an `OrderStatusHistory` row |
-| FR-3.5 | Transitioning to the same status is a no-op returning `200` |
+| FR-3.5 | Transitioning to the same status is an idempotent no-op returning `200`, leaving the version and history untouched |
 | FR-3.6 | Transitions from a terminal state always return `409` |
 
 ### FR-4 — List orders
@@ -423,7 +431,7 @@ Each requirement is phrased to be directly testable.
 | FR-5.4 | A reason is mandatory for admin cancellations; `400` if absent |
 | FR-5.5 | Cancelling from a disallowed state returns `409` |
 | FR-5.6 | Cancellation records `CancelledBy`, `CancellationReason`, `CancelledAt` and a history row |
-| FR-5.7 | Cancelling an already-cancelled order returns `409` and does not overwrite the original audit data |
+| FR-5.7 | Cancelling an already-cancelled order is an idempotent no-op returning `200`, and never overwrites the original `CancelledBy`, `CancellationReason` or `CancelledAt` |
 
 ### FR-6 — Background status promotion
 
@@ -798,7 +806,33 @@ Test data is built with the builder pattern to keep intent legible. Tests are in
 parallelizable. No `Thread.Sleep` anywhere — time is always controlled through `TimeProvider`, so
 a five-minute schedule is verified in milliseconds.
 
-### 12.4 Test-fidelity gap
+**Delivered:** 269 tests (217 domain, 52 integration), all passing.
+
+### 12.4 Verifying that the tests can fail
+
+A suite that has never been observed failing is an assumption, not evidence. Two guards were
+applied to the tests covering the central invariants.
+
+**Independently-declared expectations.** The transition matrix test enumerates all 75
+`(actor × from × to)` combinations and checks each against an expectation written longhand in the
+test file. Deriving those expectations from `OrderStatusTransitions` would be tautological — the
+test would pass for any implementation, including one that permitted every transition.
+
+**Mutation testing.** Each critical invariant was deliberately broken and the suite re-run:
+
+| Mutation applied | Outcome |
+| --- | --- |
+| Customers granted the admin cancellation window (§6.3) | 4 domain tests failed |
+| Claim statement's atomicity removed (§9.3) | 5 integration tests failed |
+
+Both suites passed again once reverted.
+
+The second mutation also exposed a defect in the *tests*: the concurrent-worker loop was unbounded,
+so a claimer that never transitions rows caused the suite to hang rather than fail. The loop now
+carries an iteration cap and a descriptive failure, because a regression should produce a red test
+in seconds rather than a stuck build.
+
+### 12.5 Test-fidelity gap
 
 One consequence of SQLite must be stated rather than glossed over: the `FOR UPDATE SKIP LOCKED`
 claim strategy (§9.3) **cannot be exercised by this test suite**, because the engine does not
