@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using OrderProcessing.Application.Abstractions;
 using OrderProcessing.Application.Orders;
 using OrderProcessing.Domain.Orders;
@@ -11,10 +12,16 @@ namespace OrderProcessing.Infrastructure.Persistence;
 /// <remarks>
 /// All LINQ composition stops here. The application layer passes an
 /// <see cref="OrderScope"/> and plain criteria; translating those into a query — and
-/// into a provider's concurrency exception back out — is this class's entire job.
+/// translating a provider's concurrency exception back out — is this class's entire job.
 /// </remarks>
 internal sealed class EfOrderRepository(OrderProcessingDbContext dbContext) : IOrderRepository
 {
+    /// <summary>
+    /// Shadow property holding the promotion lease. Defined on the persistence model
+    /// only, so the scheduling mechanism never appears on the domain aggregate.
+    /// </summary>
+    internal const string PromotionLeaseProperty = "PromotionLease";
+
     public async Task<Order?> FindAsync(
         Guid orderId,
         OrderScope scope,
@@ -68,17 +75,39 @@ internal sealed class EfOrderRepository(OrderProcessingDbContext dbContext) : IO
         return new OrderPage(orders, totalCount);
     }
 
+    public async Task<IReadOnlyList<Order>> LoadForPromotionAsync(
+        IReadOnlyCollection<Guid> orderIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(orderIds);
+
+        if (orderIds.Count == 0)
+        {
+            return [];
+        }
+
+        var orders = await WithGraph(dbContext.Orders)
+            .Where(order => orderIds.Contains(order.Id))
+            .ToListAsync(cancellationToken);
+
+        // Release the lease as part of the same unit of work. The claim exists only to
+        // stop two workers picking up the same order; once the aggregate has been
+        // loaded for promotion it has served its purpose, and clearing it here means a
+        // lease can never outlive its transaction.
+        foreach (var order in orders)
+        {
+            dbContext.Entry(order).Property(PromotionLeaseProperty).CurrentValue = null;
+        }
+
+        return orders;
+    }
+
     public void Add(Order order) => dbContext.Orders.Add(order);
 
-    public void AddStatusHistory(IEnumerable<OrderStatusHistory> entries)
+    public async Task<ITransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)
     {
-        // Clear *before* adding, not after. The promotion updates status via raw SQL
-        // (specification section 9.3), so any Order already tracked in this scope holds
-        // a stale status; detaching it prevents a later read reporting Pending for a
-        // now-Processing order. Clearing afterwards would discard the very entries
-        // being added here before they could be saved.
-        dbContext.ChangeTracker.Clear();
-        dbContext.OrderStatusHistory.AddRange(entries);
+        var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        return new EfTransaction(transaction);
     }
 
     public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
@@ -97,6 +126,15 @@ internal sealed class EfOrderRepository(OrderProcessingDbContext dbContext) : IO
 
             throw new ConcurrencyConflictException(orderId, ex);
         }
+    }
+
+    /// <summary>Adapts EF Core's transaction to the application-layer port.</summary>
+    private sealed class EfTransaction(IDbContextTransaction transaction) : ITransaction
+    {
+        public Task CommitAsync(CancellationToken cancellationToken = default) =>
+            transaction.CommitAsync(cancellationToken);
+
+        public ValueTask DisposeAsync() => transaction.DisposeAsync();
     }
 
     /// <summary>

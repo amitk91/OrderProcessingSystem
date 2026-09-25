@@ -47,6 +47,18 @@ public sealed class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         using var scope = Services.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<OrderProcessingDbContext>();
 
+        // Guard against the isolation silently lapsing. If the connection-string
+        // override is ever ignored again, the suite would quietly run against a file
+        // on disk that persists between runs — which is exactly what happened before
+        // the DbContext registration was changed to resolve configuration lazily.
+        var actual = dbContext.Database.GetConnectionString();
+        if (actual is null || !actual.Contains("Mode=Memory", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Integration tests must run against an isolated in-memory database, but the " +
+                $"DbContext resolved '{actual}'. Test results would depend on previous runs.");
+        }
+
         // Migrate rather than EnsureCreated, so tests run against the schema that ships.
         await dbContext.Database.MigrateAsync();
 

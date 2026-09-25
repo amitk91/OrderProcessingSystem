@@ -38,11 +38,22 @@ public static class DependencyInjection
         this IServiceCollection services,
         IConfiguration configuration)
     {
-        var connectionString = configuration.GetConnectionString("Default")
-            ?? "Data Source=orders.db";
-
-        services.AddDbContext<OrderProcessingDbContext>(options =>
+        // Configuration is resolved when the DbContext is constructed, not when it is
+        // registered. Reading it eagerly here would capture whatever the configuration
+        // held at registration time, so any provider layered in afterwards — a test
+        // harness pointing at an isolated database, a secret store supplying a real
+        // connection string — would be silently ignored and the default used instead.
+        //
+        // This is the same failure mode that previously affected the JWT signing key.
+        // It is worth stating plainly: an eagerly-read connection string meant the
+        // integration suite ran against a file on disk that persisted between runs,
+        // while believing it had a private in-memory database per test class.
+        services.AddDbContext<OrderProcessingDbContext>((serviceProvider, options) =>
         {
+            var resolved = serviceProvider.GetRequiredService<IConfiguration>();
+            var connectionString = resolved.GetConnectionString("Default")
+                ?? "Data Source=orders.db";
+
             options.UseSqlite(connectionString, sqlite =>
                 sqlite.MigrationsAssembly(typeof(OrderProcessingDbContext).Assembly.FullName));
         });

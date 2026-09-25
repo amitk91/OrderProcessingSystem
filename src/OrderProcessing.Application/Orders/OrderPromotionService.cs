@@ -20,19 +20,21 @@ public readonly record struct PromotionRunResult(int Claimed, int Promoted, int 
 /// section 9.4).
 /// </summary>
 /// <remarks>
-/// This is a use case, so it lives in the application layer alongside the others. The
-/// split from <c>OrderPromotionBackgroundService</c> is deliberate and is the clearest
-/// illustration of the layering:
-/// <list type="bullet">
-///   <item><b>Infrastructure</b> decides <em>when</em> to run — timers, host lifetime,
-///   service scopes.</item>
-///   <item><b>Application</b> (this type) decides <em>what</em> a run does — batching,
-///   failure isolation, audit entries.</item>
-///   <item><b>Infrastructure</b> again decides <em>how</em> to claim safely, behind
-///   <see cref="IPendingOrderClaimer"/>, because that is provider-specific.</item>
+/// <para>Each batch runs in one transaction with three steps:</para>
+/// <list type="number">
+///   <item><b>Claim</b> — take an exclusive lock on up to <c>batchSize</c> pending
+///   orders. A lock, not a transition: nothing about the order changes yet.</item>
+///   <item><b>Promote</b> — load those aggregates and call
+///   <see cref="Order.PromoteToProcessing"/>, so the transition is validated by the
+///   same matrix the API uses and writes its own audit entry.</item>
+///   <item><b>Commit</b> — status and history persist together, or neither does.</item>
 /// </list>
-/// The practical payoff is that a run can be invoked directly in tests, with no host
-/// and no waiting on a clock.
+///
+/// <para>The earlier design collapsed steps 1 and 2 into a single SQL statement. It
+/// claimed atomically and behaved correctly, but it restated the transition rule in
+/// SQL and committed the status change before the audit entry was written — so an
+/// interrupted run could leave an order promoted with no history. Splitting the lock
+/// from the transition removes both problems without giving up exactly-once claiming.</para>
 /// </remarks>
 public sealed class OrderPromotionService(
     IOrderRepository orders,
@@ -51,19 +53,11 @@ public sealed class OrderPromotionService(
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var now = timeProvider.GetUtcNow();
-            var claimedIds = await claimer.ClaimPendingOrdersAsync(batchSize, now, cancellationToken);
+            var batchResult = await PromoteOneBatchAsync(batchSize, cancellationToken);
+            result = result.Add(batchResult.Claimed, batchResult.Promoted, batchResult.Failed);
 
-            if (claimedIds.Count == 0)
-            {
-                break;
-            }
-
-            var (promoted, failed) = await RecordPromotionsAsync(claimedIds, now, cancellationToken);
-            result = result.Add(claimedIds.Count, promoted, failed);
-
-            // A short batch means the backlog is drained; stop rather than spin.
-            if (claimedIds.Count < batchSize)
+            // Nothing claimed, or a short batch: the backlog is drained.
+            if (batchResult.Claimed < batchSize)
             {
                 break;
             }
@@ -72,36 +66,48 @@ public sealed class OrderPromotionService(
         return result;
     }
 
-    private async Task<(int Promoted, int Failed)> RecordPromotionsAsync(
-        IReadOnlyList<Guid> claimedIds,
-        DateTimeOffset occurredAt,
+    private async Task<PromotionRunResult> PromoteOneBatchAsync(
+        int batchSize,
         CancellationToken cancellationToken)
     {
-        var historyEntries = new List<OrderStatusHistory>(claimedIds.Count);
+        // One transaction per batch: bounds how long locks are held, and keeps a large
+        // backlog from becoming one long-running write (specification section 9.4).
+        await using var transaction = await orders.BeginTransactionAsync(cancellationToken);
+
+        var claimedIds = await claimer.ClaimPendingOrdersAsync(batchSize, cancellationToken);
+        if (claimedIds.Count == 0)
+        {
+            return PromotionRunResult.Empty;
+        }
+
+        var claimed = await orders.LoadForPromotionAsync(claimedIds, cancellationToken);
+        var now = timeProvider.GetUtcNow();
+        var promoted = 0;
         var failed = 0;
 
-        foreach (var orderId in claimedIds)
+        foreach (var order in claimed)
         {
             try
             {
-                historyEntries.Add(OrderStatusHistory.ForSystemPromotion(orderId, occurredAt));
+                // The single point of enforcement. The matrix permits System to move an
+                // order from Pending to Processing and nothing else; anything no longer
+                // pending is rejected here rather than silently overwritten.
+                if (order.PromoteToProcessing(now))
+                {
+                    promoted++;
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // FR-6.7: one bad order must not cost the rest of the batch.
                 failed++;
-                PromotionLog.PromotionHistoryFailed(logger, orderId, ex);
+                PromotionLog.PromotionFailed(logger, order.Id, ex);
             }
         }
 
-        if (historyEntries.Count == 0)
-        {
-            return (0, failed);
-        }
-
-        orders.AddStatusHistory(historyEntries);
         await orders.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
 
-        return (historyEntries.Count, failed);
+        return new PromotionRunResult(claimedIds.Count, promoted, failed);
     }
 }

@@ -17,6 +17,14 @@ public sealed record OrderQueryCriteria(
 public sealed record OrderPage(IReadOnlyList<Order> Orders, int TotalCount);
 
 /// <summary>
+/// An open unit-of-work transaction. Disposing without committing rolls back.
+/// </summary>
+public interface ITransaction : IAsyncDisposable
+{
+    Task CommitAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// Persistence port for the order aggregate (specification section 4).
 /// </summary>
 /// <remarks>
@@ -56,14 +64,28 @@ public interface IOrderRepository
 
     Task<OrderPage> ListAsync(OrderQueryCriteria criteria, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Loads the given orders for modification. Used by the promotion job after
+    /// claiming, so the transition can be applied through the aggregate rather than in
+    /// SQL.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately takes no <see cref="OrderScope"/>: the caller is the background job
+    /// acting as <c>System</c>, and the ids come from a claim it already holds a lock
+    /// on. Ownership does not apply, which is why this is a separate method rather than
+    /// an overload that would weaken the scoping guarantee elsewhere.
+    /// </remarks>
+    Task<IReadOnlyList<Order>> LoadForPromotionAsync(
+        IReadOnlyCollection<Guid> orderIds,
+        CancellationToken cancellationToken = default);
+
     void Add(Order order);
 
     /// <summary>
-    /// Appends audit entries for transitions applied outside the aggregate — currently
-    /// only the background promotion, which is performed by a single atomic statement
-    /// (specification section 9.3).
+    /// Begins a transaction spanning the claim and the promotion, so an order's status
+    /// change and its audit entry commit together or not at all (FR-6.5).
     /// </summary>
-    void AddStatusHistory(IEnumerable<OrderStatusHistory> entries);
+    Task<ITransaction> BeginTransactionAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Commits the unit of work. Throws <see cref="ConcurrencyConflictException"/> if

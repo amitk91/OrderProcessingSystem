@@ -24,7 +24,7 @@ The database is created, migrated and seeded on first run. No configuration, no 
 connection string to set.
 
 ```bash
-dotnet test        # 295 tests, no external dependencies
+dotnet test        # 298 tests, no external dependencies
 ```
 
 To reset everything, delete `src/OrderProcessing.Api/orders.db` and restart.
@@ -173,30 +173,56 @@ do, so the constraint forced a good decision earlier rather than imposing a work
 catalogue. If a price changes later, historical orders still show what the customer actually agreed
 to pay. Recomputing an old total from current prices would be a correctness and compliance defect.
 
-### The background job claims work atomically
+### The background job claims work, then promotes through the aggregate
 
 The brief's one line — *"update PENDING orders to PROCESSING every 5 minutes"* — hides the real
 questions: what happens with two instances, is the backlog loaded wholesale, does one bad order
 roll back the batch, and how do you test a five-minute timer without waiting five minutes?
 
-Claiming is a single atomic statement:
+Each batch runs in **one transaction**, in three steps:
+
+```csharp
+await using var transaction = await orders.BeginTransactionAsync(ct);
+
+var ids     = await claimer.ClaimPendingOrdersAsync(batchSize, ct);  // 1. lock
+var claimed = await orders.LoadForPromotionAsync(ids, ct);
+
+foreach (var order in claimed)
+    order.PromoteToProcessing(now);                                  // 2. transition
+
+await orders.SaveChangesAsync(ct);
+await transaction.CommitAsync(ct);                                   // 3. commit together
+```
+
+**A claim is a lock, not a transition.** That separation is the point. Claiming answers *who gets
+to work on this order*, which is a concurrency concern and provider-specific. Promoting answers
+*what state it moves to*, which is a business rule and belongs to the aggregate.
+
+Under SQLite the lock is taken by stamping a lease, since there is no `FOR UPDATE SKIP LOCKED`:
 
 ```sql
-UPDATE orders
-SET "Status" = 'Processing', "UpdatedAt" = $now, "Version" = "Version" + 1
+UPDATE orders SET "PromotionLease" = $lease
 WHERE "Id" IN (
-    SELECT "Id" FROM orders WHERE "Status" = 'Pending' ORDER BY "CreatedAt" LIMIT $batchSize
-)
-AND "Status" = 'Pending'
+    SELECT "Id" FROM orders
+    WHERE "Status" = 'Pending' AND "PromotionLease" IS NULL
+    ORDER BY "CreatedAt" LIMIT $batchSize)
+AND "Status" = 'Pending' AND "PromotionLease" IS NULL
 RETURNING "Id";
 ```
 
-The trailing `AND "Status" = 'Pending'` is load-bearing: it re-asserts the expected state at
-execution time, so an order cancelled between selection and update is not promoted. `RETURNING`
-reports exactly which rows changed, so history is written only for orders genuinely transitioned.
+The lease is an EF Core **shadow property** — it exists in the database but not on the `Order`
+aggregate, so a scheduling mechanism never leaks into the domain. It is cleared in the same
+transaction that promotes the order, so it cannot outlive the work it guards and there are no
+stale leases to reap. PostgreSQL would use `SELECT … FOR UPDATE SKIP LOCKED` instead and need no
+lease at all; both sit behind `IPendingOrderClaimer`.
 
-This sits behind an `IPendingOrderClaimer` port. PostgreSQL would use
-`SELECT … FOR UPDATE SKIP LOCKED`; the scheduler, the domain and the tests are unchanged either way.
+**Why not do it in one statement?** An earlier version did:
+`UPDATE … SET Status = 'Processing' … RETURNING Id`. It was atomic and behaved correctly, but it
+had two flaws worth naming:
+
+1. It **restated the transition rule in SQL**, so the matrix was no longer enforced in one place.
+2. It committed the status change *independently of the audit entry*, so an interrupted run could
+   leave an order promoted with no history — violating FR-6.5.
 
 The job takes its clock from `TimeProvider`, so a five-minute schedule is verified in microseconds
 with no `Thread.Sleep` and no flakiness.
@@ -212,13 +238,13 @@ timing-dependent — and covered by a test that runs both operations concurrentl
 
 ## Testing
 
-**295 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
+**298 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
 
 | Suite | Count | Scope |
 | --- | --- | --- |
 | Domain | 222 | State machine, `Money`, aggregate invariants, clock, **architecture rules** |
 | Application | 21 | Use cases against substituted ports — **no database, no host** |
-| Integration | 52 | Full HTTP stack, security, scheduler, concurrency |
+| Integration | 55 | Full HTTP stack, security, scheduler, concurrency, promotion integrity |
 
 Not the EF Core InMemory provider: it enforces no unique constraints, foreign keys or check
 constraints, so the idempotency and integrity tests would pass there without exercising anything. A

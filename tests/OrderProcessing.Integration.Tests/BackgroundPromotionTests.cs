@@ -114,9 +114,12 @@ public sealed class BackgroundPromotionTests(ApiFactory factory)
         }
 
         await using var scope = factory.CreateAsyncScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IOrderRepository>();
         var claimer = scope.ServiceProvider.GetRequiredService<IPendingOrderClaimer>();
 
-        var claimed = await claimer.ClaimPendingOrdersAsync(2, DateTimeOffset.UtcNow);
+        // A claim is scoped to a transaction, so one has to be open.
+        await using var transaction = await repository.BeginTransactionAsync();
+        var claimed = await claimer.ClaimPendingOrdersAsync(2);
 
         claimed.Count.ShouldBe(2);
     }
@@ -139,27 +142,42 @@ public sealed class BackgroundPromotionTests(ApiFactory factory)
         {
             var claims = new List<Guid>();
             await using var scope = factory.CreateAsyncScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IOrderRepository>();
             var claimer = scope.ServiceProvider.GetRequiredService<IPendingOrderClaimer>();
 
-            // Bounded rather than while(true): if the claim ever stops transitioning
-            // rows, an unbounded loop would hang the suite instead of failing it.
-            // A broken implementation should produce a red test, not a stuck build.
+            // Bounded rather than while(true): if claiming ever stops making progress,
+            // an unbounded loop would hang the suite instead of failing it. A broken
+            // implementation should produce a red test, not a stuck build.
             const int maxIterations = 100;
 
             for (var iteration = 0; iteration < maxIterations; iteration++)
             {
-                var batch = await claimer.ClaimPendingOrdersAsync(3, DateTimeOffset.UtcNow);
+                await using var transaction = await repository.BeginTransactionAsync();
+                var batch = await claimer.ClaimPendingOrdersAsync(3);
+
                 if (batch.Count == 0)
                 {
                     return claims;
                 }
 
                 claims.AddRange(batch);
+
+                // Promote and commit, exactly as the real run does. The commit is what
+                // makes the claim durable; rolling back would return the orders to the
+                // pool and another worker would legitimately pick them up.
+                var loaded = await repository.LoadForPromotionAsync(batch);
+                foreach (var order in loaded)
+                {
+                    order.PromoteToProcessing(DateTimeOffset.UtcNow);
+                }
+
+                await repository.SaveChangesAsync();
+                await transaction.CommitAsync();
             }
 
             throw new InvalidOperationException(
                 $"Claiming did not drain after {maxIterations} iterations; " +
-                "the claim statement is probably not transitioning rows.");
+                "the claim statement is probably not locking rows.");
         });
 
         var allClaims = (await Task.WhenAll(claimTasks)).SelectMany(claims => claims).ToList();

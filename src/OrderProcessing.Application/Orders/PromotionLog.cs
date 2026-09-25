@@ -15,6 +15,6 @@ internal static partial class PromotionLog
     [LoggerMessage(
         EventId = 1007,
         Level = LogLevel.Error,
-        Message = "Failed to record promotion history for order {OrderId}.")]
-    public static partial void PromotionHistoryFailed(ILogger logger, Guid orderId, Exception exception);
+        Message = "Failed to promote order {OrderId}; the rest of the batch continues.")]
+    public static partial void PromotionFailed(ILogger logger, Guid orderId, Exception exception);
 }

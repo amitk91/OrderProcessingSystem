@@ -449,9 +449,73 @@ been written into.
 The generalisable lesson: **layer names are claims, and claims need tests.** A README asserting a
 dependency rule proves nothing. `ArchitectureTests` does.
 
----
+### Entry 11 — A review point about documentation uncovered two real bugs
 
-## Summary
+**Task.** A second review finding: *"The background job does not route through `Order.TransitionTo`.
+Both the README and the XML doc say the matrix is enforced in exactly one place that the
+controllers and the job both call. But `SqlitePendingOrderClaimer` sets `Status = 'Processing'` in
+raw SQL… The behaviour is still correct, but the enforcement is duplicated, in SQL, not
+centralised. That's the actual trade-off: you gave up single-point enforcement to get atomic
+claiming."*
+
+**The framing was exactly right**, and more generous than the code deserved. The reviewer
+characterised it as a documentation defect with a defensible trade-off underneath. Checking the
+trade-off is where it stopped being defensible.
+
+**Bug 1 — the promotion was not transactional.** `SqlitePendingOrderClaimer` could enlist in an
+ambient transaction, but *nothing ever opened one*. So the claim statement auto-committed the
+status change, and the audit rows were written by a separate `SaveChanges` afterwards. A crash
+between the two leaves an order `PROCESSING` with **no history row** — a direct violation of
+FR-6.5, in the one code path whose entire purpose is changing status.
+
+The duplicated rule the reviewer spotted was the visible symptom; the missing transaction was the
+defect underneath it. Both had the same cause: collapsing "claim this order" and "transition this
+order" into a single SQL statement conflated a concurrency concern with a business rule.
+
+**Correction 1.** Separated them. A claim is now a **lock, not a transition** — it stamps a lease
+and changes nothing else. Promotion loads the claimed aggregates and calls
+`Order.PromoteToProcessing`, so the matrix is genuinely the single point of enforcement, and
+status plus audit entry commit together in one transaction. The lease is an EF Core *shadow
+property*, so the scheduling mechanism does not appear on the domain aggregate, and it is cleared
+in the same transaction — there are no stale leases to reap.
+
+A pleasing side effect: `OrderStatusHistory.ForSystemPromotion` could be deleted. It existed only
+to hand-build the audit row the bypass had skipped, and its own XML comment argued it was "not a
+general-purpose bypass" — a comment defending a design that should not have existed.
+
+**Bug 2 — the integration tests were not isolated.** Writing a test to prove the audit gap, I found
+**204 orphaned orders** out of **863** — in a suite that creates perhaps eighty. The database was
+not the per-factory in-memory one the fixture configures; it was a **file on disk**, accumulating
+across every run of the day, holding relics of every earlier version of the promotion code.
+
+The cause was identical to the JWT defect in Entry 9: `AddPersistence` read
+`configuration.GetConnectionString("Default")` **eagerly at registration**, so the test harness's
+override — layered in afterwards — was ignored and the default `orders.db` used instead. The same
+mistake, in the same file, surviving the same review that fixed its twin.
+
+**Correction 2.** The `DbContext` now resolves its connection string lazily via the
+`IServiceProvider` overload, and `ApiFactory` asserts at startup that it actually got an in-memory
+database, failing loudly otherwise. Verified by running the suite twice and confirming no
+`orders.db` is produced.
+
+**What this says about the earlier test results.** Every integration run before this point was
+executing against shared, accumulating state. They passed, and they were testing real behaviour —
+but they were not independent, and a test that depends on execution history is not a regression
+guard. This does not invalidate the findings in earlier entries, but it does mean "the suite
+passed" carried less weight then than it does now.
+
+**Why this entry matters.** The reviewer reported a wording problem. Taking it seriously — rather
+than editing the sentence to match the code, which was the tempting fix — surfaced a durability bug
+in the audit trail and a correctness-of-testing bug that invalidated the suite's independence.
+
+Two lessons worth keeping:
+
+- **A documentation defect is a hypothesis that the code is wrong.** The gap between what a system
+  claims and what it does is rarely only in the prose.
+- **Fixing a bug is not the same as fixing its class.** Entry 9 corrected one eagerly-read
+  configuration value. The identical mistake sat six lines away in the same method and was not
+  looked for. Asking *"where else does this pattern appear?"* is worth more than the individual
+  fix.
 
 **Where AI helped most**
 
@@ -475,3 +539,7 @@ dependency rule proves nothing. `ArchitectureTests` does.
 a tireless collaborator that raises concerns you would not have thought to consider. But it has
 never run the program, never seen the machine, and will not tell you when your own requirements
 contradict each other. Verification is the part that stays yours.
+
+---
+
+## Summary

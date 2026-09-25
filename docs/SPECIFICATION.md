@@ -536,72 +536,92 @@ The job depends on `TimeProvider` (built into the BCL since .NET 8) rather than 
 timer is abstracted behind an interface. Tests use a fake time provider to advance the clock
 deterministically — a 5-minute schedule is verified in milliseconds, with no `Thread.Sleep`.
 
-### 9.3 Claiming orders safely
+### 9.3 Claiming and promoting
 
-The claim step must guarantee that no order is ever promoted twice, even with concurrent workers.
-The mechanism is database-specific, so it sits behind a port:
+Each batch runs in **one transaction** and separates two concerns that an earlier revision
+conflated:
 
-```csharp
-public interface IPendingOrderClaimer
-{
-    Task<IReadOnlyList<Guid>> ClaimAsync(int batchSize, CancellationToken ct);
-}
-```
+| Step | Concern | Where it lives |
+| --- | --- | --- |
+| **Claim** | Who may work on these orders — concurrency, provider-specific | `IPendingOrderClaimer` |
+| **Promote** | What state they move to — a business rule | `Order.PromoteToProcessing` |
+| **Commit** | Status and audit entry persist together | `IOrderRepository` |
 
-**SQLite adapter (this build) — atomic conditional update.** SQLite serializes writes with a
-database-level write lock, so a single statement is inherently atomic. The claim is expressed as
-a conditional `UPDATE` whose `WHERE` clause re-asserts the expected state:
+**A claim is a lock, not a transition.** Claiming does not change an order's status; it reserves
+the right to promote it. Promotion then goes through the aggregate, so the transition matrix in
+section 6.2 remains the single point of enforcement and the audit entry is written by the same
+code path that serves the API.
+
+**SQLite adapter (this build) — lease stamping.** SQLite has no `FOR UPDATE SKIP LOCKED`, so the
+lock is taken by writing. A single atomic statement stamps a lease onto pending rows and reports
+which ones it stamped; because SQLite serialises writes, it cannot interleave with another
+worker's:
 
 ```sql
 UPDATE orders
-SET status = 'PROCESSING', updated_at = @now, version = version + 1
-WHERE id IN (
-    SELECT id FROM orders
-    WHERE status = 'PENDING'
-    ORDER BY created_at
-    LIMIT @batchSize
+SET "PromotionLease" = $lease
+WHERE "Id" IN (
+    SELECT "Id" FROM orders
+    WHERE "Status" = 'Pending' AND "PromotionLease" IS NULL
+    ORDER BY "CreatedAt"
+    LIMIT $batchSize
 )
-AND status = 'PENDING'
-RETURNING id;
+AND "Status" = 'Pending' AND "PromotionLease" IS NULL
+RETURNING "Id";
 ```
 
-The trailing `AND status = 'PENDING'` is the load-bearing part: the update applies only to rows
-still pending at execution time, so an order cancelled between selection and update is not
-promoted (FR-6.6). `RETURNING` reports exactly which rows were claimed, so history rows are
-written only for orders genuinely transitioned.
+The lease is an EF Core **shadow property**: present in the database and the persistence model but
+absent from the `Order` aggregate, so a scheduling mechanism cannot leak into the domain. It is
+cleared in the transaction that promotes the order, so it never outlives the work it guards —
+there are no stale leases to reap, and an abandoned run leaves no trace.
 
-**PostgreSQL adapter (production) — `FOR UPDATE SKIP LOCKED`.** Under a true multi-writer engine,
-each worker locks a disjoint row set and `SKIP LOCKED` steps over rows another worker already
-holds, so workers progress in parallel rather than blocking:
+**PostgreSQL adapter (production) — `FOR UPDATE SKIP LOCKED`.** Under a true multi-writer engine
+each worker locks a disjoint row set and steps over rows another worker already holds, so workers
+progress in parallel. No lease column is needed, because the engine provides row locks directly:
 
 ```sql
 SELECT id FROM orders
-WHERE status = 'PENDING'
+WHERE status = 'Pending'
 ORDER BY created_at
 LIMIT @batchSize
 FOR UPDATE SKIP LOCKED;
 ```
 
-**Why the port exists.** These two strategies have identical semantics (claim at most `batchSize`
-pending orders, exactly once) but rely on different guarantees — SQLite on write serialization,
-PostgreSQL on row-level locking. Isolating the difference behind one interface keeps the
-scheduler's logic, the domain, and every test in §12.2 unchanged across providers. It is the
-clearest example in the codebase of the layering in §4 paying for itself.
+**Why the port exists.** Both strategies satisfy one contract — claim at most `batchSize` pending
+orders, exactly once, releasing the claim if the transaction is abandoned — while relying on
+different guarantees. Isolating the difference keeps the promotion use case, the domain and every
+test unchanged across providers.
 
-**Honest limitation.** SQLite's single-writer lock means concurrent workers serialize rather than
-parallelize. Correctness is preserved — no order is promoted twice — but throughput does not scale
+**What an earlier revision did, and why it changed.** The first implementation claimed and
+transitioned in one statement (`UPDATE ... SET Status = 'Processing' ... RETURNING Id`). It was
+atomic and behaved correctly, but it carried two defects:
+
+1. It **restated the transition rule in SQL**, so section 6.2 was no longer the single point of
+   enforcement — the rule existed twice, in two languages, free to diverge.
+2. It committed the status change **independently of the audit entry**, because no transaction
+   spanned the two writes. An interrupted run could leave an order `PROCESSING` with no history
+   row, violating FR-6.5.
+
+The second is the more serious, and is why the design changed rather than merely the prose
+describing it. Both are now covered by `PromotionIntegrityTests`.
+
+**Honest limitation.** SQLite's single-writer lock means concurrent workers serialise rather than
+parallelise. Correctness is preserved — no order is promoted twice — but throughput does not scale
 with workers. This is a scaling ceiling, not a correctness gap, and it is the principal reason a
-production deployment would move to PostgreSQL (§3.1).
-
+production deployment would move to PostgreSQL (section 3.1).
 ### 9.4 Execution model
 
 - **Bounded batches** (default 100, configurable) loop until no `PENDING` orders remain or a
   per-run cap is reached, bounding memory and transaction duration
-- **One transaction per batch**, so a large backlog does not hold a single long transaction
+- **One transaction per batch** spanning claim, promotion and commit, so a status change and its
+  audit entry are never written apart (FR-6.5), and a large backlog does not hold a single long
+  transaction
 - **Failure isolation** — a per-order failure is logged and skipped; the rest of the batch commits
 - **Non-overlapping runs** — a run exceeding the interval is not re-entered; the next tick is skipped
-- **Status re-checked inside the transaction**, so an order cancelled between claim and commit is
-  not promoted (FR-6.6)
+- **The aggregate re-checks the transition**, so an order cancelled between claim and promotion is
+  rejected by the matrix rather than silently overwritten (FR-6.6)
+- **Claims released on abandonment** — an uncommitted run rolls back, returning its orders to the
+  pool with no residue
 - **Graceful shutdown** honouring the host `CancellationToken`
 
 ### 9.5 Observability
@@ -824,11 +844,20 @@ Each test class gets an isolated SQLite database — in-memory with a private co
 or a temporary file where multiple connections must observe the same data (the concurrent-worker
 tests). Migrations are applied per fixture, so the schema under test is the schema that ships.
 
+**Isolation is asserted, not assumed.** `ApiFactory` checks at startup that the `DbContext`
+actually resolved an in-memory connection string and fails loudly otherwise. This guard exists
+because it did not hold: an eagerly-read connection string meant the override was ignored and the
+suite silently ran against a file on disk that accumulated across runs. Tests were passing, but
+they were not independent, and results depended on execution history. A claimed isolation property
+is worth as much as a claimed layering property — which is to say, only as much as the check that
+enforces it.
+
 Test data is built with the builder pattern to keep intent legible. Tests are independent and
 parallelizable. No `Thread.Sleep` anywhere — time is always controlled through `TimeProvider`, so
 a five-minute schedule is verified in milliseconds.
 
-**Delivered:** 295 tests (222 domain including architecture rules, 21 application, 52 integration), all passing.
+**Delivered:** 298 tests (222 domain including architecture rules, 21 application, 55 integration),
+all passing.
 
 ### 12.4 Verifying that the tests can fail
 

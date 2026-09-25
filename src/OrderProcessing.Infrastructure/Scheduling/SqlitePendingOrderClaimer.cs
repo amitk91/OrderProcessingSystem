@@ -14,22 +14,20 @@ namespace OrderProcessing.Infrastructure.Scheduling;
 /// (specification section 9.3).
 /// </summary>
 /// <remarks>
-/// SQLite serialises writes behind a database-level lock, so a single statement is
-/// inherently atomic. The claim is therefore expressed as one conditional
-/// <c>UPDATE ... RETURNING</c> rather than the <c>SELECT ... FOR UPDATE SKIP LOCKED</c>
-/// used under PostgreSQL, which SQLite does not support.
+/// <para>SQLite has no <c>FOR UPDATE SKIP LOCKED</c>, so the lock is taken by writing:
+/// a single atomic statement stamps a lease onto pending rows and reports which ones it
+/// stamped. Because SQLite serialises writes, that statement cannot interleave with
+/// another worker's, so two workers never stamp the same row.</para>
 ///
-/// Two details carry the correctness argument:
-/// <list type="number">
-///   <item>The outer <c>WHERE ... AND status = 'Pending'</c> re-asserts the expected
-///   state at execution time, so an order cancelled between the inner select and the
-///   update is not promoted (FR-6.6).</item>
-///   <item><c>RETURNING</c> reports exactly which rows changed, so history is written
-///   only for orders genuinely transitioned — never for ones another worker took.</item>
-/// </list>
+/// <para><b>The lease is a lock, not domain state.</b> It is an EF Core <em>shadow
+/// property</em> — present in the database and the persistence model but not on the
+/// <see cref="Order"/> aggregate — so a scheduling mechanism cannot leak into the
+/// domain. It is cleared in the same transaction that promotes the order, so it never
+/// outlives the work it guards and there are no stale leases to reap.</para>
 ///
-/// The version column is incremented in the same statement, keeping the optimistic
-/// concurrency token consistent with writes made through the aggregate.
+/// <para>The status is deliberately <em>not</em> changed here. Promotion goes through
+/// <c>Order.PromoteToProcessing</c> so the transition matrix remains the single point
+/// of enforcement, and the status change commits together with its audit entry.</para>
 /// </remarks>
 internal sealed class SqlitePendingOrderClaimer(
     OrderProcessingDbContext dbContext,
@@ -37,65 +35,48 @@ internal sealed class SqlitePendingOrderClaimer(
 {
     private const string ClaimSql = """
         UPDATE orders
-        SET "Status" = $newStatus,
-            "UpdatedAt" = $now,
-            "Version" = "Version" + 1
+        SET "PromotionLease" = $lease
         WHERE "Id" IN (
             SELECT "Id" FROM orders
             WHERE "Status" = $pendingStatus
+              AND "PromotionLease" IS NULL
             ORDER BY "CreatedAt"
             LIMIT $batchSize
         )
         AND "Status" = $pendingStatus
+        AND "PromotionLease" IS NULL
         RETURNING "Id";
         """;
 
     public async Task<IReadOnlyList<Guid>> ClaimPendingOrdersAsync(
         int batchSize,
-        DateTimeOffset occurredAt,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(batchSize, 1);
 
-        var claimedIds = new List<Guid>(batchSize);
+        var transaction = dbContext.Database.CurrentTransaction
+            ?? throw new InvalidOperationException(
+                "A claim must be made inside a transaction so it is released if the run is abandoned. " +
+                $"Open one via {nameof(IOrderRepository)}.{nameof(IOrderRepository.BeginTransactionAsync)}.");
+
         var connection = (SqliteConnection)dbContext.Database.GetDbConnection();
+        var claimedIds = new List<Guid>(batchSize);
 
-        var wasClosed = connection.State != System.Data.ConnectionState.Open;
-        if (wasClosed)
+        await using var command = connection.CreateCommand();
+        command.CommandText = ClaimSql;
+        command.Transaction = (SqliteTransaction)transaction.GetDbTransaction();
+
+        command.Parameters.AddWithValue("$pendingStatus", nameof(OrderStatus.Pending));
+        command.Parameters.AddWithValue("$batchSize", batchSize);
+        command.Parameters.AddWithValue(
+            "$lease",
+            Guid.CreateVersion7().ToString("D", CultureInfo.InvariantCulture));
+
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            await connection.OpenAsync(cancellationToken);
-        }
-
-        try
-        {
-            await using var command = connection.CreateCommand();
-            command.CommandText = ClaimSql;
-
-            // Enlist in the ambient transaction when the caller has opened one, so the
-            // claim and any follow-up writes commit or roll back together.
-            if (dbContext.Database.CurrentTransaction?.GetDbTransaction() is SqliteTransaction transaction)
-            {
-                command.Transaction = transaction;
-            }
-
-            command.Parameters.AddWithValue("$newStatus", nameof(OrderStatus.Processing));
-            command.Parameters.AddWithValue("$pendingStatus", nameof(OrderStatus.Pending));
-            command.Parameters.AddWithValue("$batchSize", batchSize);
-            command.Parameters.AddWithValue(
-                "$now",
-                occurredAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
-
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 claimedIds.Add(Guid.Parse(reader.GetString(0)));
-            }
-        }
-        finally
-        {
-            if (wasClosed)
-            {
-                await connection.CloseAsync();
             }
         }
 

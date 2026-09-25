@@ -70,31 +70,4 @@ public sealed class OrderStatusHistory
             actor.UserId,
             string.IsNullOrWhiteSpace(reason) ? null : reason.Trim(),
             changedAt);
-
-    /// <summary>
-    /// Records a <see cref="OrderStatus.Pending"/> to <see cref="OrderStatus.Processing"/>
-    /// promotion performed by the background job.
-    /// </summary>
-    /// <remarks>
-    /// Public because the promotion is applied by a single atomic SQL statement rather
-    /// than through the aggregate (specification section 9.3), so the audit entry has to
-    /// be constructed alongside it. The transition is hard-coded rather than parameterised
-    /// so this cannot become a general-purpose bypass of
-    /// <see cref="Order.TransitionTo"/> — the scheduler's only legal move is this one.
-    /// </remarks>
-    public static OrderStatusHistory ForSystemPromotion(Guid orderId, DateTimeOffset changedAt)
-    {
-        if (orderId == Guid.Empty)
-        {
-            throw new ArgumentException("Order id must not be empty.", nameof(orderId));
-        }
-
-        return Record(
-            orderId,
-            OrderStatus.Pending,
-            OrderStatus.Processing,
-            Actor.System,
-            reason: null,
-            changedAt);
-    }
 }

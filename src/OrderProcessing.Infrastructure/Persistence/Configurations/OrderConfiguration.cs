@@ -69,6 +69,13 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<Order>
             .IsConcurrencyToken()
             .IsRequired();
 
+        // Shadow property: the promotion lease exists in the database and in this
+        // model, but not on the Order aggregate. Claiming is a scheduling concern
+        // (specification section 9.3), and keeping it out of the domain means the
+        // aggregate has no idea it can be queued.
+        builder.Property<string?>("PromotionLease")
+            .HasMaxLength(64);
+
         builder.HasMany(order => order.Items)
             .WithOne()
             .HasForeignKey(item => item.OrderId)
@@ -89,6 +96,12 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<Order>
         // Serves both admin status filtering and the scheduler's claim query.
         builder.HasIndex(order => new { order.Status, order.CreatedAt })
             .HasDatabaseName("IX_Orders_Status_CreatedAt");
+
+        // The claim query filters on an unleased pending row, so the lease belongs in
+        // the index that serves it.
+        builder.HasIndex(order => order.Status)
+            .HasFilter("\"PromotionLease\" IS NULL")
+            .HasDatabaseName("IX_Orders_Status_Unleased");
 
         // Supports sorting by total (FR-4.7) without a scan.
         builder.HasIndex(order => new { order.CustomerId, order.TotalAmountMinor })
