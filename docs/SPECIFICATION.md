@@ -37,6 +37,10 @@ production e-commerce system, excluded here to keep the assignment focused.
 | Notifications (email / SMS) | Would be delivered via the outbox pattern; noted as future work |
 | Multi-currency | Single currency assumed; the money type is designed so this can be added |
 
+Separately, this build runs with **no external infrastructure at all** — no Docker, no database
+server, no cloud resources. That is a constraint on the deliverable rather than on the design;
+see §3.2 for exactly what it does and does not change.
+
 ---
 
 ## 2. Glossary
@@ -56,34 +60,83 @@ production e-commerce system, excluded here to keep the assignment focused.
 
 | Concern | Choice | Rationale |
 | --- | --- | --- |
-| Runtime | .NET 8 (LTS) | Long-term support; built-in `TimeProvider` and `BackgroundService` |
+| Runtime | .NET 10 (LTS) | Current LTS; built-in `TimeProvider` and `BackgroundService` |
 | API | ASP.NET Core Web API | Standard, well-understood, first-class OpenAPI support |
-| Persistence | PostgreSQL 16 + EF Core 8 (Npgsql) | See §3.1 |
+| Persistence | SQLite + EF Core 10 | See §3.1 — zero-install, real relational semantics |
 | Migrations | EF Core Migrations | Version-controlled, reviewable schema changes |
-| Validation | FluentValidation | Keeps validation rules out of controllers and independently testable |
-| Auth | JWT bearer (`Microsoft.AspNetCore.Authentication.JwtBearer`) | Stateless, role claims, standard tooling |
-| Testing | xUnit, FluentAssertions, Testcontainers, WebApplicationFactory | Real database in tests; no in-memory provider fiction |
-| Containerization | Docker + docker-compose | Single-command startup for a reviewer |
-| CI | GitHub Actions | Build, test and report on every push |
+| Validation | FluentValidation 12 | Keeps validation rules out of controllers and independently testable |
+| Auth | JWT bearer (`Microsoft.AspNetCore.Authentication.JwtBearer`) | Stateless, role claims; symmetric dev signing key |
+| API docs | Swashbuckle (Swagger UI) | Interactive contract exploration at `/swagger` |
+| Logging | Serilog | Structured JSON logs with correlation IDs (§10.4) |
+| Testing | xUnit, Shouldly, NSubstitute, WebApplicationFactory, SQLite | A real relational engine in tests, not a fake provider |
+| Package management | Central Package Management | Single source of truth for versions across seven projects |
+| External dependencies | **None** | See §3.2 |
+| CI | GitHub Actions | Build and test on every push; no service containers required |
 
-### 3.1 Why PostgreSQL
+### 3.1 Why SQLite
 
-The order domain is transactional and money-bearing, so a relational ACID store is the correct
-choice; eventual consistency is not acceptable for whether a customer was charged. Between the
-relational options, PostgreSQL was chosen because:
+This build runs with **zero external infrastructure** (§3.2), which rules out a server-based
+database. Two options remained.
 
-1. **`FOR UPDATE SKIP LOCKED`** is exactly the primitive the background job needs to claim
-   batches safely across multiple instances (§9.3).
-2. **No licensing friction** — Testcontainers-based integration tests run on any machine or CI runner.
-3. **MVCC** gives good reader/writer concurrency; readers do not block writers.
-4. **JSONB** is available for flexible product attributes without leaving the relational model.
+**Why not the EF Core InMemory provider.** It is not a relational database. It does not enforce
+unique constraints, foreign keys, check constraints, or real transaction semantics. Tests written
+against it pass while the same code fails on any real database — it would silently invalidate
+FR-1.12 (unique idempotency key), FR-1.3 (foreign-key integrity) and every concurrency test in
+§12.2. Using it would make the test suite actively misleading, which is worse than having fewer
+tests.
 
-SQL Server would be equally capable — the design is unchanged, substituting the `READPAST` hint
-for `SKIP LOCKED`. The choice is driven by ecosystem and licensing rather than capability.
+**Why SQLite.** It is a genuine relational, ACID, transactional engine that runs in-process with
+no installation. It enforces constraints and foreign keys, supports transactions and savepoints,
+and — for a single-node assignment — gives honest persistence semantics. It ships as a NuGet
+package, so `dotnet run` is the entire setup.
+
+**What SQLite costs us, and how each cost is handled:**
+
+| Limitation | Impact | Mitigation |
+| --- | --- | --- |
+| No `FOR UPDATE SKIP LOCKED` | Scheduler cannot claim rows by locking | Atomic `UPDATE … RETURNING` behind a port (§9.3) |
+| No server-generated `rowversion` / `xmin` | No native optimistic concurrency token | Application-managed `Version` column (§10.2) |
+| No native `decimal` type | `ORDER BY` on money is unsupported and incorrect | Money stored as integer minor units (§5.4) |
+| Single-writer lock | Writes serialize | Acceptable at assignment scale; noted as the reason to move to a server DB |
+| No native `uuid` / `timestamptz` | Stored as TEXT | EF Core value converters with enforced UTC |
+
+**What production would use.** PostgreSQL. The order domain is transactional and money-bearing, so
+a relational ACID store is correct regardless — eventual consistency is not acceptable for whether
+a customer was charged. PostgreSQL adds `FOR UPDATE SKIP LOCKED` (the natural fit for the
+scheduler), MVCC so readers never block writers, `xmin` for free optimistic concurrency, native
+`numeric`, and true multi-writer concurrency. The migration path is deliberately narrow: a second
+`IPendingOrderClaimer` adapter and a provider swap, with no change to the domain, application
+layer, or API contract.
 
 > A production e-commerce platform would be polyglot: relational for orders and payments,
 > Elasticsearch for product search, Redis for carts and sessions, and a warehouse for analytics.
 > This service owns the **orders** bounded context, which is squarely relational.
+
+### 3.2 Zero-infrastructure constraint
+
+**The system must run with `dotnet run` and nothing else** — no Docker, no database server, no
+cloud resources, no message broker, no external identity provider.
+
+This is a deliberate constraint on the *deliverable*, not a simplification of the *design*. Every
+functional requirement in §7, the whole API contract in §11, the security model in §8 and the
+state machine in §6 are delivered exactly as specified. The constraint is absorbed entirely below
+the repository and scheduler ports.
+
+Consequences, stated plainly so they are not mistaken for oversights:
+
+- The database is a local SQLite file (`orders.db`), created and migrated automatically on first run
+- Seed data (products, two customers, one admin) is applied at startup so the API is immediately usable
+- JWT tokens are signed with a symmetric development key from configuration; no external identity provider
+- Notifications and payments remain out of scope (§1.2) rather than being stubbed, since a fake
+  implementation of an unspecified integration demonstrates nothing
+- Single-process deployment; horizontal scaling is a design property (§10.3), not something
+  demonstrated at runtime
+
+**What is *not* mocked.** The database is real, the transactions are real, the concurrency control
+is real, and the scheduler genuinely claims and promotes rows. Nothing in the order lifecycle is
+faked or short-circuited — a stubbed repository returning canned objects would make the tests in
+§12.2 meaningless. "No infrastructure" here means *no external process to install*, not *no real
+behaviour*.
 
 ---
 
@@ -95,18 +148,26 @@ infrastructure is a primary evaluation criterion.
 
 ```
 src/
-  OrderProcessing.Domain/          — entities, value objects, state machine, domain errors
+  OrderProcessing.Domain/          — entities, Money value object, state machine, domain errors
                                      (no external dependencies)
-  OrderProcessing.Application/     — use cases, DTOs, port interfaces, validators
-  OrderProcessing.Infrastructure/  — EF Core, repositories, auth, background job
+  OrderProcessing.Application/     — use cases, DTOs, port interfaces (IOrderRepository,
+                                     IPendingOrderClaimer, IUnitOfWork), validators
+  OrderProcessing.Infrastructure/  — EF Core + SQLite, repositories, claim adapter, auth,
+                                     background job
   OrderProcessing.Api/             — controllers, middleware, composition root
 tests/
   OrderProcessing.Domain.Tests/        — fast, no I/O
   OrderProcessing.Application.Tests/   — use cases against test doubles
-  OrderProcessing.Integration.Tests/   — full stack against Testcontainers PostgreSQL
+  OrderProcessing.Integration.Tests/   — full stack against a real SQLite database
 ```
 
 **Dependency rule:** `Api → Infrastructure → Application → Domain`. The domain references nothing.
+
+**Why the ports matter here.** The zero-infrastructure constraint (§3.2) makes this layering
+load-bearing rather than decorative: the database-specific parts of the design — the claim
+strategy (§9.3) and the concurrency token (§10.2) — are exactly the parts that differ between
+SQLite and PostgreSQL. Confining them behind ports is what keeps the domain, the use cases and
+the test suite identical across both.
 
 **Transaction boundary:** one transaction per use case, opened in the application layer via a
 unit-of-work abstraction. The background job uses one transaction *per batch* (§9.4).
@@ -119,63 +180,70 @@ unit-of-work abstraction. The background job uses one transaction *per batch* (�
 
 **Customer**
 
-| Field | Type | Notes |
+| Field | Type (SQLite) | Notes |
 | --- | --- | --- |
-| `Id` | `uuid` | PK |
-| `Email` | `varchar(256)` | Unique, case-insensitive |
-| `FullName` | `varchar(200)` | |
-| `CreatedAt` | `timestamptz` | |
+| `Id` | `TEXT` (GUID) | PK |
+| `Email` | `TEXT` | Unique, case-insensitive (`NOCASE` collation) |
+| `FullName` | `TEXT` | Max length 200, enforced by EF + validation |
+| `CreatedAt` | `TEXT` (ISO-8601 UTC) | |
 
 **Product**
 
-| Field | Type | Notes |
+| Field | Type (SQLite) | Notes |
 | --- | --- | --- |
-| `Id` | `uuid` | PK |
-| `Sku` | `varchar(64)` | Unique |
-| `Name` | `varchar(200)` | |
-| `UnitPrice` | `numeric(18,2)` | Authoritative price; never accepted from the client |
-| `IsActive` | `boolean` | Inactive products cannot be ordered |
+| `Id` | `TEXT` (GUID) | PK |
+| `Sku` | `TEXT` | Unique |
+| `Name` | `TEXT` | Max length 200 |
+| `UnitPriceMinor` | `INTEGER` | Price in minor units (cents) — see §5.4 |
+| `Currency` | `TEXT` | ISO 4217, 3 chars |
+| `IsActive` | `INTEGER` (0/1) | Inactive products cannot be ordered |
 
 **Order**
 
-| Field | Type | Notes |
+| Field | Type (SQLite) | Notes |
 | --- | --- | --- |
-| `Id` | `uuid` | PK |
-| `OrderNumber` | `varchar(20)` | Human-readable, unique (e.g. `ORD-2026-000042`) |
-| `CustomerId` | `uuid` | FK → Customer, indexed |
-| `Status` | `varchar(16)` | Enum, indexed |
-| `TotalAmount` | `numeric(18,2)` | Always computed server-side |
-| `Currency` | `char(3)` | ISO 4217 |
-| `IdempotencyKey` | `varchar(64)` | Nullable, unique per customer |
-| `CreatedAt` / `UpdatedAt` | `timestamptz` | |
-| `CancelledAt` | `timestamptz` | Nullable |
-| `CancelledBy` | `varchar(16)` | Nullable — `Customer` / `Admin` / `System` |
-| `CancellationReason` | `varchar(500)` | Nullable; mandatory for admin cancellations |
-| `Version` | `xmin` (concurrency token) | Optimistic concurrency (§10.2) |
+| `Id` | `TEXT` (GUID) | PK |
+| `OrderNumber` | `TEXT` | Human-readable, unique (e.g. `ORD-2026-000042`) |
+| `CustomerId` | `TEXT` (GUID) | FK → Customer, indexed |
+| `Status` | `TEXT` | Enum stored as string for readability, indexed |
+| `TotalAmountMinor` | `INTEGER` | Always computed server-side (§5.4) |
+| `Currency` | `TEXT` | ISO 4217 |
+| `IdempotencyKey` | `TEXT` | Nullable; unique per customer (filtered index) |
+| `CreatedAt` / `UpdatedAt` | `TEXT` (ISO-8601 UTC) | |
+| `CancelledAt` | `TEXT` (ISO-8601 UTC) | Nullable |
+| `CancelledBy` | `TEXT` | Nullable — `Customer` / `Admin` / `System` |
+| `CancellationReason` | `TEXT` | Nullable; mandatory for admin cancellations |
+| `Version` | `INTEGER` | Application-managed concurrency token (§10.2) |
 
 **OrderItem**
 
-| Field | Type | Notes |
+| Field | Type (SQLite) | Notes |
 | --- | --- | --- |
-| `Id` | `uuid` | PK |
-| `OrderId` | `uuid` | FK → Order, indexed, cascade delete |
-| `ProductId` | `uuid` | FK → Product |
-| `ProductName` | `varchar(200)` | **Snapshot** at order time |
-| `UnitPrice` | `numeric(18,2)` | **Snapshot** at order time |
-| `Quantity` | `int` | `> 0` |
-| `LineTotal` | `numeric(18,2)` | `UnitPrice × Quantity`, persisted for auditability |
+| `Id` | `TEXT` (GUID) | PK |
+| `OrderId` | `TEXT` (GUID) | FK → Order, indexed, cascade delete |
+| `ProductId` | `TEXT` (GUID) | FK → Product |
+| `ProductName` | `TEXT` | **Snapshot** at order time |
+| `UnitPriceMinor` | `INTEGER` | **Snapshot** at order time |
+| `Quantity` | `INTEGER` | `> 0`, enforced by check constraint |
+| `LineTotalMinor` | `INTEGER` | `UnitPriceMinor × Quantity`, persisted for auditability |
 
 **OrderStatusHistory**
 
-| Field | Type | Notes |
+| Field | Type (SQLite) | Notes |
 | --- | --- | --- |
-| `Id` | `uuid` | PK |
-| `OrderId` | `uuid` | FK → Order, indexed |
-| `FromStatus` / `ToStatus` | `varchar(16)` | `FromStatus` null on creation |
-| `ChangedBy` | `varchar(16)` | `Customer` / `Admin` / `System` |
-| `ChangedByUserId` | `uuid` | Nullable — null for system transitions |
-| `Reason` | `varchar(500)` | Nullable |
-| `ChangedAt` | `timestamptz` | |
+| `Id` | `TEXT` (GUID) | PK |
+| `OrderId` | `TEXT` (GUID) | FK → Order, indexed |
+| `FromStatus` / `ToStatus` | `TEXT` | `FromStatus` null on creation |
+| `ChangedBy` | `TEXT` | `Customer` / `Admin` / `System` |
+| `ChangedByUserId` | `TEXT` (GUID) | Nullable — null for system transitions |
+| `Reason` | `TEXT` | Nullable, max length 500 |
+| `ChangedAt` | `TEXT` (ISO-8601 UTC) | |
+
+> **Note on types.** SQLite has no native `uuid`, `timestamptz`, `decimal` or `boolean` types.
+> GUIDs and timestamps are persisted as TEXT via EF Core value converters, with timestamps
+> normalized to UTC on write and read back as `DateTimeOffset`. Foreign keys are enforced
+> (`PRAGMA foreign_keys = ON`). Under PostgreSQL these become `uuid`, `timestamptz`, `bigint` and
+> `boolean` with no change above the persistence layer.
 
 ### 5.2 Why price snapshots matter
 
@@ -190,15 +258,40 @@ current prices would be a correctness and compliance defect.
 | --- | --- |
 | `IX_Orders_CustomerId_CreatedAt` | The dominant query: a customer's orders, newest first |
 | `IX_Orders_Status_CreatedAt` | Admin filtering by status, and the scheduler's claim query |
-| `IX_Orders_IdempotencyKey` (unique, filtered) | Idempotent creation lookup |
+| `IX_Orders_CustomerId_TotalAmountMinor` | Supports the `totalAmount` sort in FR-4.7 |
+| `UX_Orders_CustomerId_IdempotencyKey` (unique, filtered on non-null) | Idempotent creation lookup, scoped per customer |
+| `UX_Orders_OrderNumber` (unique) | Human-readable lookup and uniqueness guarantee |
 | `IX_OrderItems_OrderId` | Loading items for an order |
 | `IX_OrderStatusHistory_OrderId_ChangedAt` | Rendering an order's audit trail |
 
-### 5.4 Money handling
+### 5.4 Money handling — integer minor units
 
-`numeric(18,2)` in PostgreSQL, mapped to `decimal` in .NET. Floating-point types are never used
-for money. Totals are always recomputed server-side from the persisted line items and never
-trusted from client input.
+**Money is stored as `INTEGER` in minor units (cents), never as a floating-point or decimal
+column.** `$49.99` is persisted as `4999`. A `Money` value object in the domain encapsulates the
+amount and currency, exposes arithmetic that cannot silently lose precision, and handles
+formatting at the API boundary — so the representation never leaks into business logic.
+
+This resolves a defect that would otherwise be shipped silently. SQLite has no native `decimal`
+type, and EF Core maps `decimal` to TEXT to preserve precision. TEXT sorts
+*lexicographically*: `"9.99"` sorts after `"100.00"`, so **FR-4.7 (sort by `totalAmount`) would
+return wrong results** — and wrong pagination on top of it. EF Core surfaces this as a warning
+about unsupported `decimal` ordering, not an error, so it is easy to miss. Mapping to REAL instead
+would trade a sorting bug for a precision bug, reintroducing floating-point error into money.
+
+Integer minor units avoid both: they sort correctly, compare correctly, aggregate exactly, and
+carry no rounding error. This is also what payment processors (Stripe, Adyen, PayPal) do, so it is
+the conventional choice rather than a workaround — the SQLite constraint simply forced a good
+decision earlier than it would otherwise have been made.
+
+Rules that follow:
+
+- All persisted monetary values are `INTEGER` minor units, suffixed `…Minor` in the schema
+- The API contract continues to expose decimal values (`149.97`); conversion happens in the
+  mapping layer only
+- `LineTotalMinor = UnitPriceMinor × Quantity` — integer arithmetic, exact by construction
+- `TotalAmountMinor = Σ LineTotalMinor`, always recomputed server-side and never trusted from input
+- Currency is stored alongside every monetary value; arithmetic across differing currencies throws
+- Floating-point types are never used for money anywhere in the system
 
 ---
 
@@ -406,18 +499,54 @@ leaks nothing.
 A hosted `BackgroundService` driven by a `PeriodicTimer`, resolving a scoped service per run.
 Quartz.NET and Hangfire were considered; a direct implementation was chosen because the
 concurrency handling *is* the interesting part of this requirement, and delegating it to a
-library would obscure the reasoning. Quartz with clustering would be the production choice once
-richer scheduling (cron expressions, misfire policies, a dashboard) is needed.
+library would obscure the reasoning. Both would also have added persistent storage and, for
+Hangfire, a dashboard process — infrastructure the zero-dependency constraint in §3.2 rules out.
+Quartz with clustering would be the production choice once richer scheduling (cron expressions,
+misfire policies, an operations dashboard) is needed.
 
 ### 9.2 Testability
 
-The job depends on `TimeProvider` (built into .NET 8) rather than `DateTime.UtcNow`, and the
+The job depends on `TimeProvider` (built into the BCL since .NET 8) rather than `DateTime.UtcNow`, and the
 timer is abstracted behind an interface. Tests use a fake time provider to advance the clock
 deterministically — a 5-minute schedule is verified in milliseconds, with no `Thread.Sleep`.
 
-### 9.3 Multi-instance safety
+### 9.3 Claiming orders safely
 
-Claiming uses `SELECT ... FOR UPDATE SKIP LOCKED`:
+The claim step must guarantee that no order is ever promoted twice, even with concurrent workers.
+The mechanism is database-specific, so it sits behind a port:
+
+```csharp
+public interface IPendingOrderClaimer
+{
+    Task<IReadOnlyList<Guid>> ClaimAsync(int batchSize, CancellationToken ct);
+}
+```
+
+**SQLite adapter (this build) — atomic conditional update.** SQLite serializes writes with a
+database-level write lock, so a single statement is inherently atomic. The claim is expressed as
+a conditional `UPDATE` whose `WHERE` clause re-asserts the expected state:
+
+```sql
+UPDATE orders
+SET status = 'PROCESSING', updated_at = @now, version = version + 1
+WHERE id IN (
+    SELECT id FROM orders
+    WHERE status = 'PENDING'
+    ORDER BY created_at
+    LIMIT @batchSize
+)
+AND status = 'PENDING'
+RETURNING id;
+```
+
+The trailing `AND status = 'PENDING'` is the load-bearing part: the update applies only to rows
+still pending at execution time, so an order cancelled between selection and update is not
+promoted (FR-6.6). `RETURNING` reports exactly which rows were claimed, so history rows are
+written only for orders genuinely transitioned.
+
+**PostgreSQL adapter (production) — `FOR UPDATE SKIP LOCKED`.** Under a true multi-writer engine,
+each worker locks a disjoint row set and `SKIP LOCKED` steps over rows another worker already
+holds, so workers progress in parallel rather than blocking:
 
 ```sql
 SELECT id FROM orders
@@ -427,9 +556,16 @@ LIMIT @batchSize
 FOR UPDATE SKIP LOCKED;
 ```
 
-Each instance locks a disjoint set of rows; `SKIP LOCKED` means a second instance steps over rows
-already claimed rather than blocking. Two instances therefore make progress in parallel without
-ever double-processing an order — satisfying FR-6.4 without a distributed lock or leader election.
+**Why the port exists.** These two strategies have identical semantics (claim at most `batchSize`
+pending orders, exactly once) but rely on different guarantees — SQLite on write serialization,
+PostgreSQL on row-level locking. Isolating the difference behind one interface keeps the
+scheduler's logic, the domain, and every test in §12.2 unchanged across providers. It is the
+clearest example in the codebase of the layering in §4 paying for itself.
+
+**Honest limitation.** SQLite's single-writer lock means concurrent workers serialize rather than
+parallelize. Correctness is preserved — no order is promoted twice — but throughput does not scale
+with workers. This is a scaling ceiling, not a correctness gap, and it is the principal reason a
+production deployment would move to PostgreSQL (§3.1).
 
 ### 9.4 Execution model
 
@@ -466,20 +602,38 @@ full aggregates for list queries, and `AsNoTracking()` on reads.
 
 ### 10.2 Concurrency and correctness
 
-An optimistic concurrency token on `Order` (PostgreSQL `xmin`) makes lost updates impossible.
+An **application-managed optimistic concurrency token** on `Order` makes lost updates impossible.
+SQLite has no server-generated `rowversion`, so `Order.Version` is an `INTEGER` marked
+`IsConcurrencyToken()` and incremented in an overridden `SaveChangesAsync`. EF Core then appends
+`WHERE Version = @original` to every update; a zero-row result raises
+`DbUpdateConcurrencyException`. The guarantee is identical to PostgreSQL's `xmin` — only the
+increment is explicit rather than implicit, and the entity model is unchanged when providers swap.
+
 The specific race worth calling out: **an admin cancels an order at the same moment the scheduler
 promotes it from `PENDING` to `PROCESSING`.** One transaction commits; the other detects the
-version change, reloads and re-evaluates against the new state. The result is deterministic
-rather than dependent on timing, and it is covered by an explicit integration test.
+version mismatch, reloads and re-evaluates against the new state. The outcome is deterministic
+rather than timing-dependent, and it is covered by an explicit integration test (§12.2, case 4).
 
 Concurrency conflicts surface as `409 Conflict` with a retry hint.
 
 ### 10.3 Reliability and availability
 
-Stateless API instances, horizontally scalable behind a load balancer. Liveness
-(`/health/live`) and readiness (`/health/ready`, including a database probe) endpoints. Graceful
-shutdown drains in-flight requests. Connection pooling with a bounded pool; transient database
-faults retried with exponential backoff via EF Core's execution strategy.
+The API is written to be stateless and horizontally scalable — no session affinity, no in-process
+mutable state, identity carried in the token. Liveness (`/health/live`) and readiness
+(`/health/ready`, including a database probe) endpoints are exposed, and graceful shutdown drains
+in-flight requests and stops the scheduler cleanly.
+
+**Stated honestly:** under SQLite this is a *single-node* deployment. Horizontal scalability is a
+property of the code, not something demonstrated at runtime, because a local database file cannot
+be shared across instances. The scheduler's claim logic is nonetheless written to be multi-worker
+safe (§9.3) and is tested with concurrent workers in-process (§12.2, case 5), so the guarantee
+holds the moment the store is swapped for a server database. Distinguishing "designed for" from
+"demonstrated at" is deliberate — claiming horizontal scale on a single-file database would be
+misleading.
+
+Transient failures are retried with exponential backoff via EF Core's execution strategy. Under
+PostgreSQL this extends to connection pooling with a bounded pool and retry on transient network
+faults.
 
 ### 10.4 Observability
 
@@ -604,10 +758,10 @@ The brief's objective names testing explicitly, so it is treated as a first-clas
 
 | Layer | Scope | Tooling |
 | --- | --- | --- |
-| **Unit — domain** | State machine, totals, invariants | xUnit, FluentAssertions |
+| **Unit — domain** | State machine, `Money` arithmetic, invariants | xUnit, Shouldly |
 | **Unit — application** | Use-case orchestration | xUnit, NSubstitute |
-| **Integration — API** | Full stack against real PostgreSQL | `WebApplicationFactory` + Testcontainers |
-| **Integration — scheduler** | Claiming, batching, concurrency | Testcontainers + fake `TimeProvider` |
+| **Integration — API** | Full stack against a real SQLite database | `WebApplicationFactory` + SQLite |
+| **Integration — scheduler** | Claiming, batching, concurrency | SQLite + fake `TimeProvider` |
 
 ### 12.2 Cases that must exist
 
@@ -621,8 +775,8 @@ These are the tests that demonstrate the design was reasoned about rather than a
    their own orders
 4. **Cancel-vs-scheduler race** — an admin cancel and a scheduler promotion issued concurrently
    against the same order produce a deterministic outcome with no lost update
-5. **Multi-instance scheduler** — two scheduler instances over a shared backlog promote every
-   order exactly once
+5. **Concurrent scheduler workers** — two workers running against a shared backlog promote every
+   order exactly once, with no duplicates and none missed
 6. **Idempotent creation** — the same `Idempotency-Key` twice yields one order
 7. **Price tampering** — a client-supplied `unitPrice` in the create payload is ignored
 8. **Price-snapshot integrity** — changing a catalog price does not alter an existing order's total
@@ -631,11 +785,33 @@ These are the tests that demonstrate the design was reasoned about rather than a
 
 ### 12.3 Approach
 
-Real PostgreSQL via Testcontainers throughout — the in-memory provider does not enforce
-constraints or reproduce locking semantics, so tests against it can pass while production fails.
+Tests run against **real SQLite**, not the EF Core InMemory provider. This matters: the InMemory
+provider ignores unique constraints, foreign keys and check constraints, so tests for FR-1.12
+(idempotency uniqueness), FR-1.3 (product integrity) and every concurrency case would pass without
+exercising anything. A test suite that cannot fail is worse than no suite at all.
+
+Each test class gets an isolated SQLite database — in-memory with a private connection for speed,
+or a temporary file where multiple connections must observe the same data (the concurrent-worker
+tests). Migrations are applied per fixture, so the schema under test is the schema that ships.
+
 Test data is built with the builder pattern to keep intent legible. Tests are independent and
-parallelizable, with per-test database isolation. No `Thread.Sleep` anywhere; time is always
-controlled via `TimeProvider`.
+parallelizable. No `Thread.Sleep` anywhere — time is always controlled through `TimeProvider`, so
+a five-minute schedule is verified in milliseconds.
+
+### 12.4 Test-fidelity gap
+
+One consequence of SQLite must be stated rather than glossed over: the `FOR UPDATE SKIP LOCKED`
+claim strategy (§9.3) **cannot be exercised by this test suite**, because the engine does not
+support it. The SQLite strategy is fully tested; the PostgreSQL strategy is not.
+
+This is why `IPendingOrderClaimer` is defined as a port with a shared contract test suite. The
+same behavioural tests — *claims at most `batchSize`*, *never claims twice*, *never claims a
+cancelled order* — are written against the interface, so the PostgreSQL adapter can be verified by
+running the identical suite against a real PostgreSQL instance if one becomes available. The tests
+exist and are provider-agnostic; only the second execution environment is missing.
+
+Being explicit about what is *not* covered is more useful than a coverage percentage that implies
+otherwise.
 
 ---
 
@@ -644,18 +820,27 @@ controlled via `TimeProvider`.
 ### 13.1 Local development
 
 ```bash
-docker compose up          # API + PostgreSQL, migrations applied on startup
-dotnet test                # full suite (Testcontainers requires a running Docker daemon)
+dotnet run --project src/OrderProcessing.Api    # starts the API; DB created and seeded on first run
+dotnet test                                     # full suite; no Docker, no services required
 ```
 
-Swagger UI at `/swagger`, with JWT auth configured so endpoints can be exercised from the browser.
-Seed data (products, two customers, an admin) is applied in `Development` so a reviewer can
-exercise the API immediately.
+No installation, no container runtime, no connection string to configure. The SQLite database file
+(`orders.db`) is created in the application's content root on first run, migrations are applied
+automatically, and seed data (a product catalog, two customers and one admin) is inserted in the
+`Development` environment so the API can be exercised immediately.
+
+Swagger UI at `/swagger`, with JWT auth wired in so endpoints can be called from the browser.
+`POST /dev/token` issues a token for any seeded customer or admin — the fastest path for a reviewer
+to authenticate. A `.http` file with ready-made requests covering the full order lifecycle is
+included alongside it.
+
+To reset state, delete `orders.db` and restart; the database is rebuilt and reseeded.
 
 ### 13.2 Continuous integration
 
 GitHub Actions on every push: restore → build with warnings as errors → unit tests → integration
-tests (Testcontainers) → coverage report.
+tests → coverage report. Because there are no service dependencies, the workflow needs no
+containers, no service definitions and no secrets, and runs on a stock runner.
 
 ### 13.3 Repository layout
 
@@ -663,7 +848,7 @@ tests (Testcontainers) → coverage report.
 /docs/SPECIFICATION.md     — this document
 /docs/AI-USAGE.md          — required AI-usage log (§14)
 /src, /tests               — as per §4
-/docker-compose.yml
+/requests.http             — sample requests covering the full lifecycle
 /README.md                 — quick start, design decisions, trade-offs, known limitations
 ```
 
@@ -695,18 +880,23 @@ circumstances. That correction is what produced the `(role, state) → state` ma
 
 | # | Decision | Alternatives considered | Rationale |
 | --- | --- | --- | --- |
-| 1 | .NET 8 + ASP.NET Core | Java/Spring Boot, Node/NestJS | Team fit; `TimeProvider` and `BackgroundService` built in |
-| 2 | PostgreSQL | SQL Server, SQLite, in-memory | `SKIP LOCKED`; no licensing friction in CI; MVCC |
-| 3 | Catalog + Customer entities | Client-supplied prices | Removes price tampering; enables snapshot semantics |
-| 4 | `PATCH /status` + `POST /cancel` | One generic endpoint; per-transition endpoints | Mirrors the brief; cancel differs in auth, precondition and semantics |
-| 5 | Role-aware transition matrix | State-only matrix | Models the real need for an admin override |
-| 6 | Cancellation capped at `PROCESSING` | Allow cancelling `SHIPPED` | Post-dispatch reversal is a returns flow, not a cancellation |
-| 7 | JWT + central query-scoping | ASP.NET Identity; stub headers | Realistic and explainable without registration/password scope creep |
-| 8 | `404` not `403` for others' orders | `403` | Avoids existence disclosure and ID enumeration |
-| 9 | `BackgroundService` + `SKIP LOCKED` | Quartz clustering; Hangfire | Concurrency handling is the substance of the requirement |
-| 10 | Optimistic concurrency via `xmin` | Pessimistic locking | Non-blocking; conflicts are rare and safely retried |
-| 11 | Clean-architecture layering | Single project | Separation of domain rules from infrastructure is an evaluation criterion |
-| 12 | Testcontainers | In-memory EF provider | In-memory does not enforce constraints or reproduce locking |
+| 1 | .NET 10 + ASP.NET Core | .NET 8; Java/Spring Boot; Node/NestJS | Current LTS and the only SDK installed; `TimeProvider` and `BackgroundService` built in |
+| 2 | SQLite, zero external dependencies | PostgreSQL in Docker; EF InMemory | Runs with `dotnet run` alone; a real relational engine, unlike InMemory |
+| 3 | Money as integer minor units | `decimal`; `numeric(18,2)` | SQLite sorts TEXT decimals lexicographically, breaking FR-4.7; integers are exact and conventional |
+| 4 | Catalog + Customer entities | Client-supplied prices | Removes price tampering; enables snapshot semantics |
+| 5 | `PATCH /status` + `POST /cancel` | One generic endpoint; per-transition endpoints | Mirrors the brief; cancel differs in auth, precondition and semantics |
+| 6 | Role-aware transition matrix | State-only matrix | Models the real need for an admin override |
+| 7 | Cancellation capped at `PROCESSING` | Allow cancelling `SHIPPED` | Post-dispatch reversal is a returns flow, not a cancellation |
+| 8 | JWT + central query-scoping | ASP.NET Identity; stub headers | Realistic and explainable without registration/password scope creep |
+| 9 | `404` not `403` for others' orders | `403` | Avoids existence disclosure and ID enumeration |
+| 10 | `IPendingOrderClaimer` port, two adapters | Inline provider-specific SQL | Keeps scheduler and tests provider-agnostic; isolates the one real portability gap |
+| 11 | Atomic `UPDATE … RETURNING` claim | `SKIP LOCKED` (unavailable on SQLite) | Correct under SQLite's write serialization; re-asserts state in the `WHERE` clause |
+| 12 | Application-managed `Version` token | `xmin`; `rowversion` | Both are server-generated and unavailable on SQLite; guarantee is identical |
+| 13 | `BackgroundService` + `PeriodicTimer` | Quartz clustering; Hangfire | Concurrency handling is the substance of the requirement; both add infrastructure |
+| 14 | Clean-architecture layering | Single project | Separation of domain rules from infrastructure is an evaluation criterion |
+| 15 | Real SQLite in tests | EF Core InMemory provider | InMemory enforces no constraints — tests would pass without proving anything |
+| 16 | Shouldly for assertions | FluentAssertions | FluentAssertions 8+ requires a paid licence for commercial use; Shouldly is BSD and equivalent here |
+| 17 | Central Package Management | Per-project versions | One source of truth for versions across seven projects; prevents silent drift |
 
 ---
 
@@ -714,10 +904,14 @@ circumstances. That correction is what produced the `(role, state) → state` ma
 
 Deliberately excluded, recorded to show the boundary was chosen rather than overlooked:
 
+- **Migration to PostgreSQL** — the largest single upgrade. Adds true multi-writer concurrency,
+  `FOR UPDATE SKIP LOCKED`, native `numeric` and `uuid`, and MVCC. The work is confined to a
+  second `IPendingOrderClaimer` adapter, a provider swap and regenerated migrations; the domain,
+  application layer, API contract and test suite are unaffected — which is the point of §4
 - **Inventory reservation** with expiry, to prevent overselling
 - **Payment integration** with an idempotent capture/refund flow
 - **Outbox pattern** for reliable `OrderPlaced` / `OrderCancelled` event publication
 - **Notifications** driven off those events
 - **Read/write separation** should list-query volume outgrow the primary
 - **Order archival** for orders beyond a retention threshold
-- **Multi-currency**, building on the existing money abstraction
+- **Multi-currency**, building on the `Money` value object introduced in §5.4

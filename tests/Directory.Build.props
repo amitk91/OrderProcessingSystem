@@ -1,0 +1,14 @@
+<Project>
+
+  <!-- Directory.Build.props resolution stops at the first file found, so the root must be
+       imported explicitly or its settings would be silently lost for test projects. -->
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- Test method names use underscores by convention; xUnit1041 fixture-arg rule is noisy. -->
+    <NoWarn>$(NoWarn);CA1707;CA2007;xUnit1041</NoWarn>
+  </PropertyGroup>
+
+</Project>
