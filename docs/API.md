@@ -94,6 +94,11 @@ Places an order for the authenticated customer. The order starts in `PENDING`.
 | `Authorization` | Yes | `Bearer <token>` |
 | `Idempotency-Key` | No | Up to 64 characters. Repeating a request with the same key returns the original order instead of creating a duplicate. Scoped per customer. |
 
+> **Safe under concurrency, not just on retry.** The guarantee holds when several requests carrying
+> the same key are in flight simultaneously: exactly one order is created, one request receives
+> `201` and the rest receive `200` with that same order. This is enforced by a unique index rather
+> than by a pre-insert check, so it cannot be defeated by timing.
+
 **Request body**
 
 | Field | Type | Rules |
@@ -459,6 +464,7 @@ Every response of both kinds carries a `correlationId` matching the server logs.
 | `concurrency-conflict` | `409` | The order changed during the request; retry |
 | `product-inactive` | `422` | Product exists but cannot be ordered |
 | `idempotency-key-conflict` | `422` | Key reused with a different payload |
+| `write-conflict` | `409` | Two requests contended for the same unique value; retry |
 | `internal-error` | `500` | Unexpected failure. No internal detail is disclosed. |
 
 An `invalid-status-transition` adds two fields so the error is actionable:

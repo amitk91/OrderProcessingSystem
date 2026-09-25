@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using OrderProcessing.Application.Abstractions;
@@ -12,15 +13,20 @@ namespace OrderProcessing.Infrastructure.Persistence;
 /// <remarks>
 /// All LINQ composition stops here. The application layer passes an
 /// <see cref="OrderScope"/> and plain criteria; translating those into a query — and
-/// translating a provider's concurrency exception back out — is this class's entire job.
+/// translating a provider's constraint and concurrency failures back out — is this
+/// class's entire job.
 /// </remarks>
 internal sealed class EfOrderRepository(OrderProcessingDbContext dbContext) : IOrderRepository
 {
+    /// <summary>SQLITE_CONSTRAINT_UNIQUE: a unique index rejected the write.</summary>
+    private const int SqliteUniqueConstraintViolation = 2067;
+
     /// <summary>
     /// Shadow property holding the promotion lease. Defined on the persistence model
     /// only, so the scheduling mechanism never appears on the domain aggregate.
     /// </summary>
     internal const string PromotionLeaseProperty = "PromotionLease";
+
 
     public async Task<Order?> FindAsync(
         Guid orderId,
@@ -125,6 +131,52 @@ internal sealed class EfOrderRepository(OrderProcessingDbContext dbContext) : IO
                 : Guid.Empty;
 
             throw new ConcurrencyConflictException(orderId, ex);
+        }
+        catch (DbUpdateException ex) when (ViolatesUniqueIndexOn(ex, nameof(Order.IdempotencyKey)))
+        {
+            var key = FailedOrder(ex)?.IdempotencyKey ?? string.Empty;
+            DetachFailedEntries(ex);
+            throw new DuplicateIdempotencyKeyException(key, ex);
+        }
+        catch (DbUpdateException ex) when (ViolatesUniqueIndexOn(ex, nameof(Order.OrderNumber)))
+        {
+            var orderNumber = FailedOrder(ex)?.OrderNumber ?? string.Empty;
+            DetachFailedEntries(ex);
+            throw new DuplicateOrderNumberException(orderNumber, ex);
+        }
+    }
+
+    /// <summary>
+    /// Identifies a unique-index violation involving <paramref name="columnName"/>.
+    /// </summary>
+    /// <remarks>
+    /// SQLite reports the offending columns only in the message text
+    /// ("UNIQUE constraint failed: orders.CustomerId, orders.IdempotencyKey"), so the
+    /// column name has to be matched there. That is fragile enough to be worth naming:
+    /// it is checked alongside the extended result code rather than on its own, and it
+    /// is confined to this adapter. Npgsql exposes <c>ConstraintName</c> directly, so a
+    /// PostgreSQL adapter would match on that instead.
+    /// </remarks>
+    private static bool ViolatesUniqueIndexOn(DbUpdateException exception, string columnName) =>
+        exception.InnerException is SqliteException
+        {
+            SqliteExtendedErrorCode: SqliteUniqueConstraintViolation
+        } sqlite
+        && sqlite.Message.Contains(columnName, StringComparison.Ordinal);
+
+    private static Order? FailedOrder(DbUpdateException exception) =>
+        exception.Entries.Select(entry => entry.Entity).OfType<Order>().FirstOrDefault();
+
+    /// <summary>
+    /// Detaches the rejected insert so the caller can retry on the same unit of work.
+    /// Without this the failed entity stays tracked as Added and the next
+    /// <see cref="SaveChangesAsync"/> would re-attempt it.
+    /// </summary>
+    private static void DetachFailedEntries(DbUpdateException exception)
+    {
+        foreach (var entry in exception.Entries)
+        {
+            entry.State = EntityState.Detached;
         }
     }
 

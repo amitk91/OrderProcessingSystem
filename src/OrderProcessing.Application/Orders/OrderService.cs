@@ -31,6 +31,12 @@ public sealed class OrderService(
     internal const int MaxPageSize = 100;
     internal const int DefaultPageSize = 20;
 
+    /// <summary>
+    /// How many times creation is retried when a concurrent request wins a race for the
+    /// same order number. Bounded so a pathological case fails rather than spins.
+    /// </summary>
+    private const int MaxCreateAttempts = 5;
+
     public async Task<CreateOrderResult> CreateAsync(
         CreateOrderCommand command,
         CancellationToken cancellationToken = default)
@@ -42,12 +48,17 @@ public sealed class OrderService(
             throw new EmptyOrderException();
         }
 
-        // FR-1.12: an identical retry returns the original order rather than a duplicate.
-        if (!string.IsNullOrWhiteSpace(command.IdempotencyKey))
+        var hasIdempotencyKey = !string.IsNullOrWhiteSpace(command.IdempotencyKey);
+
+        // FR-1.12: the fast path. A sequential retry finds the original here and never
+        // reaches the insert. It cannot be relied on alone, though — two concurrent
+        // requests can both miss this read before either writes, so the unique index is
+        // the real enforcement and the loop below handles losing that race.
+        if (hasIdempotencyKey)
         {
             var existing = await orders.FindByIdempotencyKeyAsync(
                 command.CustomerId,
-                command.IdempotencyKey,
+                command.IdempotencyKey!,
                 cancellationToken);
 
             if (existing is not null)
@@ -59,19 +70,45 @@ public sealed class OrderService(
 
         var lines = await ResolveCatalogueLinesAsync(command, cancellationToken);
 
-        var order = Order.Create(
-            Guid.CreateVersion7(),
-            await orderNumberGenerator.NextAsync(cancellationToken),
-            command.CustomerId,
-            lines,
-            lines[0].UnitPrice.Currency,
-            timeProvider.GetUtcNow(),
-            string.IsNullOrWhiteSpace(command.IdempotencyKey) ? null : command.IdempotencyKey);
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                var order = Order.Create(
+                    Guid.CreateVersion7(),
+                    await orderNumberGenerator.NextAsync(cancellationToken),
+                    command.CustomerId,
+                    lines,
+                    lines[0].UnitPrice.Currency,
+                    timeProvider.GetUtcNow(),
+                    hasIdempotencyKey ? command.IdempotencyKey : null);
 
-        orders.Add(order);
-        await orders.SaveChangesAsync(cancellationToken);
+                orders.Add(order);
+                await orders.SaveChangesAsync(cancellationToken);
 
-        return new CreateOrderResult(ToDto(order), WasCreated: true);
+                return new CreateOrderResult(ToDto(order), WasCreated: true);
+            }
+            catch (DuplicateIdempotencyKeyException) when (hasIdempotencyKey)
+            {
+                // A concurrent request created the order first. That is the contract
+                // working, not a failure: return what the winner created.
+                var winner = await orders.FindByIdempotencyKeyAsync(
+                    command.CustomerId,
+                    command.IdempotencyKey!,
+                    cancellationToken)
+                    ?? throw new InvalidOperationException(
+                        "The idempotency key was rejected as duplicate but no matching order was found.");
+
+                EnsureIdempotentRequestMatches(winner, command);
+                return new CreateOrderResult(ToDto(winner), WasCreated: false);
+            }
+            catch (DuplicateOrderNumberException) when (attempt < MaxCreateAttempts)
+            {
+                // Two requests read the same "highest number" and allocated the same
+                // value. Transient: the next attempt reads the number the winner
+                // committed and moves past it.
+            }
+        }
     }
 
     public async Task<OrderDto> GetAsync(

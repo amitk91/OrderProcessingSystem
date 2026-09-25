@@ -61,3 +61,43 @@ public sealed class ConcurrencyConflictException(Guid orderId, Exception innerEx
 
     public override string ErrorCode => "concurrency-conflict";
 }
+
+/// <summary>
+/// Signals that another request created an order with the same idempotency key while
+/// this one was in flight (FR-1.12).
+/// </summary>
+/// <remarks>
+/// <para>Raised by <see cref="Abstractions.IOrderRepository.SaveChangesAsync"/> when the
+/// unique index on (customer, idempotency key) rejects an insert. It is an internal
+/// signal, not an error: the application layer handles it by returning the order the
+/// winning request created.</para>
+///
+/// <para>This exists because the idempotency check cannot be made race-free by reading
+/// first. Two requests can both miss the read before either writes, so the database
+/// constraint is the real enforcement and the violation is the signal that someone
+/// else won.</para>
+/// </remarks>
+public sealed class DuplicateIdempotencyKeyException(string key, Exception innerException)
+    : DomainException($"Idempotency key '{key}' was used by a concurrent request.", innerException)
+{
+    public string Key { get; } = key;
+
+    public override string ErrorCode => "idempotency-key-race";
+}
+
+/// <summary>
+/// Signals that two requests allocated the same order number concurrently (FR-1.10).
+/// </summary>
+/// <remarks>
+/// Order numbers are allocated as "highest for the current year, plus one", so
+/// concurrent callers can read the same maximum. Transient by nature: the application
+/// layer retries with a freshly allocated number. A production deployment would use a
+/// database sequence and avoid the collision entirely.
+/// </remarks>
+public sealed class DuplicateOrderNumberException(string orderNumber, Exception innerException)
+    : DomainException($"Order number '{orderNumber}' was allocated concurrently.", innerException)
+{
+    public string OrderNumber { get; } = orderNumber;
+
+    public override string ErrorCode => "order-number-race";
+}

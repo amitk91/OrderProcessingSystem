@@ -398,8 +398,10 @@ Each requirement is phrased to be directly testable.
 | FR-1.8 | Duplicate product IDs in one request are merged, summing their quantities |
 | FR-1.9 | New orders are created as `PENDING` |
 | FR-1.10 | A unique, human-readable `OrderNumber` is assigned |
+| FR-1.10a | Concurrent creations receive distinct order numbers; a collision is retried, never surfaced |
 | FR-1.11 | An initial `OrderStatusHistory` row (`null → PENDING`) is written |
 | FR-1.12 | Repeating a request with the same `Idempotency-Key` returns the original order, not a duplicate |
+| FR-1.12a | The guarantee holds under concurrency: several in-flight requests sharing a key yield exactly one order, one `201` and the rest `200` |
 | FR-1.13 | The order is attributed to the authenticated caller; a `customerId` in the body is ignored |
 | FR-1.14 | Responds `201 Created` with a `Location` header |
 
@@ -766,6 +768,23 @@ A double-clicked checkout button must not create two orders. The client supplies
 `Idempotency-Key` header; the key is stored unique-per-customer. A repeat request with the same
 key returns the **original** order with `200 OK` rather than creating a duplicate. A key reused
 with a *different* payload returns `422 Unprocessable Entity`.
+
+**The read cannot enforce this on its own.** Checking for an existing key before inserting handles
+a sequential retry, but two concurrent requests can both miss that read before either writes. The
+unique index is therefore the real enforcement, and the constraint violation is treated as a
+*signal* rather than an error: the losing request re-reads the key and returns the order the
+winner created. Twelve concurrent requests sharing a key produce one `201`, eleven `200`s and
+exactly one order.
+
+The same pattern applies to `OrderNumber`. Numbers are allocated as "highest for the current year,
+plus one", so concurrent callers can read the same maximum. The collision is caught by the unique
+index and the allocation is retried, bounded at five attempts. A production deployment would use a
+database sequence and avoid the contention entirely — this is noted as a known limitation rather
+than presented as the ideal design.
+
+> **Why this is worth stating.** Read-then-write is the default shape of an idempotency check, and
+> it passes every sequential test. The failure only appears under genuine concurrency, which is
+> precisely the situation the feature exists to survive.
 
 ### 11.3 Error format
 

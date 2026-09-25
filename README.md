@@ -24,7 +24,7 @@ The database is created, migrated and seeded on first run. No configuration, no 
 connection string to set.
 
 ```bash
-dotnet test        # 298 tests, no external dependencies
+dotnet test        # 315 tests, no external dependencies
 ```
 
 To reset everything, delete `src/OrderProcessing.Api/orders.db` and restart.
@@ -231,20 +231,40 @@ with no `Thread.Sleep` and no flakiness.
 
 An application-managed `Version` column is an EF Core concurrency token. The race that matters:
 **an admin cancels while the scheduler promotes.** One transaction wins; the other gets
-`DbUpdateConcurrencyException` and re-evaluates against the new state. Deterministic, not
+`ConcurrencyConflictException` and re-evaluates against the new state. Deterministic, not
 timing-dependent — and covered by a test that runs both operations concurrently.
+
+**Uniqueness is enforced by the database, not by a preceding read.** Order creation has two values
+that must be unique — the idempotency key and the order number — and both are allocated by
+read-then-write, which cannot be made race-free on its own. Two requests can both miss the read
+before either writes.
+
+So the unique index is treated as the enforcement, and its violation as a *signal*:
+
+| Collision | Response |
+| --- | --- |
+| Same idempotency key | Re-read the key and return the order the winner created — `200` |
+| Same order number | Transient; allocate a fresh number and retry, bounded at five attempts |
+
+Twelve concurrent requests sharing a key produce **one `201`, eleven `200`s, and one order**.
+Twelve concurrent requests without a key produce **twelve orders with twelve distinct numbers**.
+Both are tested.
+
+This is worth calling out because read-then-write is the default shape of an idempotency check and
+it passes every sequential test. The failure only appears under real concurrency — exactly the
+situation the feature exists to survive.
 
 ---
 
 ## Testing
 
-**298 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
+**315 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
 
 | Suite | Count | Scope |
 | --- | --- | --- |
 | Domain | 222 | State machine, `Money`, aggregate invariants, clock, **architecture rules** |
 | Application | 21 | Use cases against substituted ports — **no database, no host** |
-| Integration | 55 | Full HTTP stack, security, scheduler, concurrency, promotion integrity |
+| Integration | 72 | Full HTTP stack, security, scheduler, creation races, promotion integrity, error mapping |
 
 Not the EF Core InMemory provider: it enforces no unique constraints, foreign keys or check
 constraints, so the idempotency and integrity tests would pass there without exercising anything. A
@@ -280,6 +300,8 @@ test in a second instead of a stuck build.
 | `Changing_a_catalogue_price_does_not_alter_an_existing_order` | Snapshot integrity |
 | `Orders_sort_by_total_numerically_and_not_as_text` | The decimal-sorting defect stays fixed |
 | `Paging_through_results_yields_no_duplicates_and_no_gaps` | Stable sort under pagination |
+| `Concurrent_requests_with_the_same_idempotency_key_all_return_the_same_order` | 12 racing requests, one order, no 5xx |
+| `Concurrent_creates_without_a_key_produce_distinct_order_numbers` | Order-number collisions retried, not surfaced |
 
 ---
 

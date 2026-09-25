@@ -31,7 +31,7 @@ internal sealed class ProblemDetailsExceptionHandler(
         ArgumentNullException.ThrowIfNull(httpContext);
 
         var correlationId = httpContext.TraceIdentifier;
-        var (status, title, errorCode) = Map(exception);
+        var (status, title, errorCode) = ProblemDetailsMapper.Map(exception);
 
         if (status >= (int)HttpStatusCode.InternalServerError)
         {
@@ -75,46 +75,4 @@ internal sealed class ProblemDetailsExceptionHandler(
             Exception = exception
         });
     }
-
-    private static (int Status, string Title, string ErrorCode) Map(Exception exception) =>
-        exception switch
-        {
-            // 404 rather than 403 for an order the caller does not own, so existence
-            // is not disclosed (specification section 8.4).
-            OrderNotFoundException => (
-                (int)HttpStatusCode.NotFound, "Order not found", "order-not-found"),
-
-            ProductNotFoundException => (
-                (int)HttpStatusCode.BadRequest, "Product not found", "product-not-found"),
-
-            // 422: the request is well-formed but the product cannot be ordered.
-            ProductInactiveException => (
-                (int)HttpStatusCode.UnprocessableEntity, "Product unavailable", "product-inactive"),
-
-            IdempotencyKeyConflictException => (
-                (int)HttpStatusCode.UnprocessableEntity,
-                "Idempotency key reused with a different request",
-                "idempotency-key-conflict"),
-
-            // 409: well-formed, but conflicts with current state.
-            InvalidStatusTransitionException => (
-                (int)HttpStatusCode.Conflict, "Invalid status transition", "invalid-status-transition"),
-
-            CancellationReasonRequiredException => (
-                (int)HttpStatusCode.BadRequest, "Cancellation reason required", "cancellation-reason-required"),
-
-            EmptyOrderException => (
-                (int)HttpStatusCode.BadRequest, "Order must contain at least one item", "empty-order"),
-
-            DomainException domain => (
-                (int)HttpStatusCode.BadRequest, "Request rejected", domain.ErrorCode),
-
-            // Concurrency conflict (specification section 10.2): the caller may retry.
-            Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException => (
-                (int)HttpStatusCode.Conflict,
-                "The order was modified concurrently; please retry",
-                "concurrency-conflict"),
-
-            _ => ((int)HttpStatusCode.InternalServerError, "An unexpected error occurred", "internal-error")
-        };
 }

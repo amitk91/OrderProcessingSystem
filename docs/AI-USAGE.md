@@ -540,6 +540,55 @@ a tireless collaborator that raises concerns you would not have thought to consi
 never run the program, never seen the machine, and will not tell you when your own requirements
 contradict each other. Verification is the part that stays yours.
 
+### Entry 12 — The third review point, and a regression the fix exposed
+
+**Task.** A third finding: *"The idempotency check is read-then-write, not atomic. Two concurrent
+requests with the same key both miss the read and both insert. The unique index catches it — but
+as a `DbUpdateException`, which your handler almost certainly maps to a 500, not to 'return the
+original order.' So the happy path works and the genuine race returns an error."*
+
+**Verified before touching anything.** A test firing eight concurrent creates confirmed the
+diagnosis, and found the problem is wider than idempotency: **`OrderNumber` races too.** It is
+allocated as "highest for the year, plus one", so concurrent callers read the same maximum and
+collide on `UX_Orders_OrderNumber`. Eight concurrent creates *with no idempotency key at all*
+returned **HTTP 500**. Any concurrent order creation failed, not just idempotent retries.
+
+The reviewer identified the pattern; the pattern had two instances.
+
+**Correction.** The insight is that a read cannot enforce uniqueness — the database already does,
+and the violation is the signal that someone else won. Both constraints are now translated at the
+repository boundary and handled according to what the collision *means*:
+
+| Collision | Meaning | Response |
+| --- | --- | --- |
+| Idempotency key | Another request created this order | Re-read the key, return the winner's order, `200` |
+| Order number | Two requests allocated the same value | Transient; retry with a fresh number, bounded at five attempts |
+
+Twelve concurrent requests sharing a key now produce one `201`, eleven `200`s and exactly one
+order. Verified both in the suite and against a running server with real parallel HTTP.
+
+**A regression the fix uncovered.** Adding the new arms to the exception-to-status switch produced
+a compiler error: *"The pattern is unreachable."* Investigating it revealed that
+`ConcurrencyConflictException` — which I introduced during Entry 10's refactor — derives from
+`DomainException`, and the general `DomainException => 400` arm sat **above** it. Every
+optimistic-concurrency conflict had been answering **400 Bad Request instead of 409 Conflict**
+since that refactor, silently, with tests passing.
+
+C# switch arms are order-sensitive and the compiler only warns when shadowing is *total*. A
+general arm above a specific one that is merely *reachable by other means* produces no diagnostic
+at all. The mapping is now extracted into `ProblemDetailsMapper` and pinned by a theory covering
+every arm, including one test named for this specific regression.
+
+**Observation on review as a technique.** Three review points have now produced, between them: a
+misplaced application layer, an untestable-by-construction security claim, a non-transactional
+audit trail, a test suite that was never isolated, two unhandled write races, and a status-code
+regression. Only two of those were the thing the reviewer actually pointed at.
+
+The pattern is consistent enough to be worth naming: **a review finding is a symptom, and the
+useful question is not "is this true?" but "what else is true if this is?"** Each point was
+correct on its own terms and understated on investigation. Treating a finding as a hypothesis to
+test — rather than a defect to patch — is what turned three comments into six fixes.
+
 ---
 
 ## Summary
