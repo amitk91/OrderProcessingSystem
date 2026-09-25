@@ -901,9 +901,12 @@ test file. Deriving those expectations from `OrderStatusTransitions` would be ta
 test would pass for any implementation, including one that permitted every transition.
 
 **A reproducible mutation audit.** `tools/mutation-audit.ps1` breaks each invariant in turn, runs
-the suite, restores the source and reports what failed. It is a script rather than a prose claim
-because a recorded mutation result describes the code as it was on the day it was run, and quietly
-stops being true when that code changes — which is exactly what happened here (see below).
+the suite, restores the source and reports what failed. Requires PowerShell 7+ (`pwsh`), which is
+cross-platform. It is a script rather than a prose claim because a recorded mutation result
+describes the code as it was on the day it was run, and quietly stops being true when that code
+changes — which is exactly what happened here (see below).
+
+The table below lists the same eight mutations the script defines, so the two cannot drift apart:
 
 | Invariant broken | Tests failed |
 | --- | --- |
@@ -912,16 +915,30 @@ stops being true when that code changes — which is exactly what happened here 
 | Customers granted the admin cancellation window (§6.3) | 5 |
 | Ownership scoping removed (§8.3) | 3 |
 | Claim drops the pending-status filter (§9.3) | 2 |
-| Unique-violation translation disabled (§11.2) | 2 |
-| Claim drops the lease guard (§9.3) | 0 |
+| Unique-violation translation disabled (§11.2) | 2–3 ¹ |
+| Claim no longer requires an enclosing transaction (§9.3) | 1 ² |
+| Claim drops the lease guard (§9.3) | 0 ³ |
 
-**On the zero.** Removing `AND "PromotionLease" IS NULL` from the claim statement fails no test
-because it changes no behaviour. The lease is cleared in the transaction that promotes, so no
-committed row carries one and the guard is always satisfied. Exactly-once claiming is provided by
-the write lock the claim takes plus the `Status = 'Pending'` filter; the lease exists so the claim
-can be expressed as a write without changing status, which is what keeps §6.2 authoritative. The
-guard is defence-in-depth against a future change that commits between claiming and promoting, and
-is retained on that basis.
+¹ Not deterministic. The underlying test races several concurrent requests, so the number of
+failing assertions depends on which lose. Reported as a range rather than a convenient single
+figure.
+
+² **Was zero until a test was added.** The guard is load-bearing: without an enclosing transaction
+the lease commits independently, so a worker that died before promoting would leave rows leased
+indefinitely, and the status change could again commit apart from its audit entry — the defect
+§9.3 was redesigned to remove. The contract was enforced in code and asserted nowhere, and only
+the audit surfaced that.
+
+³ **Genuinely zero.** Removing `AND "PromotionLease" IS NULL` fails no test because it changes no
+behaviour. The lease is cleared in the transaction that promotes, so no committed row carries one
+and the guard is always satisfied. Exactly-once claiming is provided by the write lock the claim
+takes plus the `Status = 'Pending'` filter; the lease exists so the claim can be expressed as a
+write without changing status, which is what keeps §6.2 authoritative. The guard is defence-in-depth
+against a future change that commits between claiming and promoting, and is retained on that basis.
+
+Both zeros are published rather than dropped, because they mean different things and the
+distinction is the informative part: one is a correct observation about a redundant guard, the
+other was a genuine gap in coverage.
 
 **Why this section exists in its current form.** An earlier revision recorded *"breaking the claim
 statement's atomicity → 5 integration tests failed."* That was accurate when measured and became

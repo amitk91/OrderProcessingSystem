@@ -53,6 +53,25 @@ public sealed class PromotionIntegrityTests(ApiFactory factory)
     }
 
     [Fact]
+    public async Task Claiming_outside_a_transaction_is_refused()
+    {
+        // The guard is load-bearing, not decorative. Without an enclosing transaction
+        // the lease would commit on its own, so a worker that died before promoting
+        // would leave rows leased forever — and, worse, the status change and its audit
+        // entry would once again be able to commit separately.
+        //
+        // This test exists because a mutation audit showed that removing the guard
+        // failed nothing: the contract was enforced in code but asserted nowhere.
+        await using var scope = factory.CreateAsyncScope();
+        var claimer = scope.ServiceProvider.GetRequiredService<IPendingOrderClaimer>();
+
+        var exception = await Should.ThrowAsync<InvalidOperationException>(
+            async () => await claimer.ClaimPendingOrdersAsync(10));
+
+        exception.Message.ShouldContain("transaction");
+    }
+
+    [Fact]
     public async Task Claiming_only_ever_returns_orders_that_are_pending()
     {
         // The claim's contract, asserted directly. Without this, the only thing

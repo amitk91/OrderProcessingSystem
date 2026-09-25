@@ -26,7 +26,7 @@ Then open **<http://localhost:5000/swagger>**.
 The database is created, migrated and seeded on first run.
 
 ```bash
-dotnet test        # 324 tests, no external dependencies
+dotnet test        # 325 tests, no external dependencies
 ```
 
 To reset everything, delete `src/OrderProcessing.Api/orders.db` and restart.
@@ -270,13 +270,13 @@ situation the feature exists to survive.
 
 ## Testing
 
-**324 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
+**325 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
 
 | Suite | Count | Scope |
 | --- | --- | --- |
 | Domain | 225 | State machine, `Money`, aggregate invariants, clock, **architecture rules** |
 | Application | 21 | Use cases against substituted ports — **no database, no host** |
-| Integration | 78 | Full HTTP stack, security, scheduler, creation races, promotion integrity, currency, error mapping |
+| Integration | 79 | Full HTTP stack, security, scheduler, creation races, promotion integrity, currency, error mapping |
 
 Not the EF Core InMemory provider: it enforces no unique constraints, foreign keys or check
 constraints, so the idempotency and integrity tests would pass there without exercising anything. A
@@ -291,11 +291,12 @@ would be tautological — it would pass for any implementation, including one pe
 Critical invariants are **mutation-tested**, and the audit is reproducible rather than asserted:
 
 ```bash
-pwsh tools/mutation-audit.ps1
+pwsh tools/mutation-audit.ps1        # requires PowerShell 7+ (pwsh), cross-platform
 ```
 
-It breaks each invariant in turn, runs the suite, restores the source, and prints what failed.
-Most recent run against the current code:
+It breaks each invariant in turn, runs the suite, restores the source whether or not the run
+succeeded, and prints what failed. Every row below comes from that script, so the table and the
+script always list the same eight mutations:
 
 | Invariant broken | Tests failed |
 | --- | --- |
@@ -304,25 +305,39 @@ Most recent run against the current code:
 | Customers granted the admin cancellation window | 5 |
 | Ownership scoping removed (customers see every order) | 3 |
 | Claim drops the pending-status filter | 2 |
-| Unique-violation translation disabled for order numbers | 2 |
-| **Claim drops the lease guard** | **0** — see below |
+| Unique-violation translation disabled for order numbers | 2–3 ¹ |
+| Claim no longer requires an enclosing transaction | 1 ² |
+| **Claim drops the lease guard** | **0** ³ |
 
-**The zero is the interesting row, and it is left in deliberately.** Removing
-`AND "PromotionLease" IS NULL` from the claim statement breaks no test, because under SQLite it
-breaks no behaviour. The lease is cleared in the same transaction that promotes, so no committed
-row ever carries one, and the guard is always trivially true.
+¹ Varies between runs. The test genuinely races several concurrent requests, so how many
+assertions fail depends on which of them lose. Reported as a range rather than rounded to a
+convenient number.
 
-What actually provides exactly-once claiming here is the pair beneath it: the claim is a *write*,
-so SQLite's write lock serialises workers, and the `Status = 'Pending'` filter means a worker that
-was blocked finds those rows already promoted. The lease exists to make the claim expressible as a
+² Was **0** until a test was added. The guard is load-bearing — without an enclosing transaction
+the lease would commit independently, so a worker that died before promoting would leave rows
+leased forever, and the status change could once again commit apart from its audit entry. The
+contract was enforced in code and asserted nowhere; the audit is what surfaced that.
+
+³ **Genuinely zero, and left in deliberately.** Removing `AND "PromotionLease" IS NULL` breaks no
+test because it breaks no behaviour. The lease is cleared in the same transaction that promotes, so
+no committed row ever carries one and the guard is always trivially true.
+
+What actually provides exactly-once claiming is the pair beneath it: the claim is a *write*, so
+SQLite's write lock serialises workers, and the `Status = 'Pending'` filter means a worker that was
+blocked finds those rows already promoted. The lease exists to make the claim expressible as a
 write *without* changing status — the separation that keeps the transition matrix authoritative —
 not to provide mutual exclusion on its own. The guard is defence-in-depth against a future change
 that commits between claiming and promoting.
 
-That row was originally reported as *"breaking the claim statement's atomicity → 5 integration
+> **Why two zeros are reported rather than quietly dropped.** They mean different things, and the
+> difference is the useful part: one is a correct statement about a redundant guard, the other was
+> a real coverage gap. A table showing only the rows that flatter the design would have hidden the
+> second.
+
+That last row was originally reported as *"breaking the claim statement's atomicity → 5 integration
 tests failed."* True when written, and false as soon as the claim statement was redesigned: the
-statement it described no longer exists. Re-running the audit is what turned a stale number into
-an accurate characterisation of how the guarantee is actually achieved.
+statement it described no longer exists. Re-running the audit is what turned a stale number into an
+accurate characterisation of how the guarantee is actually achieved.
 
 The mutation runs also exposed a flaw in the tests themselves: an unbounded claim loop meant a
 broken implementation *hung* rather than failing. It is now bounded, so a regression produces a red
@@ -421,7 +436,7 @@ multi-currency. Each is a subsystem in its own right; see
 | [docs/SPECIFICATION.md](./docs/SPECIFICATION.md) | Design spec: ~50 numbered requirements, domain model, security model, NFRs, decision log |
 | [docs/AI-USAGE.md](./docs/AI-USAGE.md) | Required AI-usage log — what AI was used for, what it got wrong, how it was corrected |
 | [requests.http](./requests.http) | Executable walkthrough of every feature, including security cases |
-| [tools/mutation-audit.ps1](./tools/mutation-audit.ps1) | Re-runs every mutation claim in this README against the current code |
+| [tools/mutation-audit.ps1](./tools/mutation-audit.ps1) | Re-runs every mutation claim in this README against the current code (needs `pwsh`) |
 
 ---
 

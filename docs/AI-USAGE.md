@@ -692,6 +692,30 @@ pending-status filter now fails 2 tests where previously it failed none, because
 matrix check was silently absorbing the error and recording it as a per-order failure rather than
 never selecting the row.
 
+**A follow-up review point, and why it was a fair hit.** The first version of the script defined
+eight mutations but the published table had seven rows. The missing one — *"claim no longer
+requires an enclosing transaction"* — I had marked `Skip` because the replacement text I first
+wrote would not compile. That is not a reason to skip a mutation; it is a reason to write a better
+one. And since the table's entire value is that a reader can run the script themselves, the first
+thing they would have found is a result I had not reported.
+
+Rewritten as a mutation that compiles (the claim silently opens its own transaction instead of
+requiring the caller's), it produced a **second zero** — and this one was a genuine gap, not a
+redundant guard. Without an enclosing transaction the lease commits independently, so a worker
+that died before promoting would leave rows leased indefinitely, and the status change could once
+again commit apart from its audit entry: precisely the defect Entry 11 redesigned §9.3 to remove.
+The contract was enforced in code and asserted nowhere. Adding
+`Claiming_outside_a_transaction_is_refused` moved that row from 0 to 1.
+
+Two zeros with two different meanings — one correct, one a gap — is why both are now published
+with footnotes rather than quietly omitted. The script also prints every zero result with a
+reminder that each needs an explicit verdict, and warns if the number of mutations stops matching
+what the documentation claims, so the specific drift that caused this cannot recur silently.
+
+One further honesty adjustment: the unique-violation row oscillates between 2 and 3 across runs,
+because the underlying test genuinely races concurrent requests. It is reported as a range. A
+single tidy number would have implied a determinism the test does not have.
+
 **Current results**, reproducible with one command:
 
 | Invariant broken | Tests failed |
@@ -701,8 +725,9 @@ never selecting the row.
 | Customers granted the admin cancellation window | 5 |
 | Ownership scoping removed | 3 |
 | Claim drops the pending-status filter | 2 |
-| Unique-violation translation disabled | 2 |
-| Claim drops the lease guard | 0 (explained above) |
+| Unique-violation translation disabled | 2–3 (non-deterministic) |
+| Claim no longer requires an enclosing transaction | 1 (was 0) |
+| Claim drops the lease guard | 0 (redundant guard, explained) |
 
 **The lesson, which generalises past this project.** Every earlier entry concluded that a *claim*
 needs a test — layer names, isolation, security properties. This one extends it: **evidence itself

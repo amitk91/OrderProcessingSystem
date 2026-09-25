@@ -1,6 +1,19 @@
 # Re-runs every mutation referenced in the documentation against the CURRENT code.
+#
 # Each mutation is applied, the relevant tests are run, and the source is restored
-# whether or not the run succeeds. Prints a table of what actually failed.
+# whether or not the run succeeded. Prints a table of what actually failed.
+#
+#   Requires: PowerShell 7+ (pwsh) and the .NET 10 SDK.
+#   Usage:    pwsh tools/mutation-audit.ps1
+#
+# Every mutation defined here has a corresponding row in the README and in
+# specification section 12.4. If you add one, add it there too — a table that lists
+# fewer mutations than the script is worse than no table, because the first thing a
+# reader who runs this will notice is a result nobody reported.
+#
+# A zero result is not automatically a failure of this script. It means the mutated
+# code is not covered, which is either a correct observation about a redundant guard
+# or a genuine gap. Both outcomes are worth reporting; see the footnotes in section 12.4.
 
 $ErrorActionPreference = 'Continue'
 $root = 'C:\Projects\OrderProcessingSystem'
@@ -36,11 +49,12 @@ $mutations = @(
     Name    = 'Claim no longer requires an enclosing transaction'
     File    = 'src\OrderProcessing.Infrastructure\Scheduling\SqlitePendingOrderClaimer.cs'
     Find    = 'var transaction = dbContext.Database.CurrentTransaction
-            ?? throw new InvalidOperationException('
+            ?? throw new InvalidOperationException(
+                "A claim must be made inside a transaction so it is released if the run is abandoned. " +
+                $"Open one via {nameof(IOrderRepository)}.{nameof(IOrderRepository.BeginTransactionAsync)}.");'
     Replace = 'var transaction = dbContext.Database.CurrentTransaction
-            ?? DummyNeverThrows('
+            ?? dbContext.Database.BeginTransaction();'
     Filter  = 'FullyQualifiedName~OrderProcessing.Integration.Tests'
-    Skip    = $true   # would not compile; the transaction requirement is a type-level guard
   },
   @{
     Name    = 'Promotion bypasses the transition matrix'
@@ -111,6 +125,21 @@ foreach ($m in $mutations) {
 
 Write-Host "`n=== Mutation audit (current code) ==="
 $results | Format-Table -AutoSize -Wrap
+
+# Guards against the defect that prompted this script's existence: documentation
+# claiming a set of mutations that no longer matches what is actually run.
+$documented = 8
+if ($results.Count -ne $documented) {
+    Write-Host "`n  WARNING: $($results.Count) mutations ran but the README and section 12.4"
+    Write-Host "           document $documented. Update them together or the table stops being evidence."
+}
+
+$zeroes = @($results | Where-Object { $_.Failed -eq 0 })
+if ($zeroes) {
+    Write-Host "`n  $($zeroes.Count) mutation(s) failed no tests. Each needs an explicit verdict:"
+    Write-Host "  either the mutated code is genuinely redundant, or it is uncovered."
+    $zeroes | ForEach-Object { Write-Host "    - $($_.Mutation)" }
+}
 
 Write-Host "`nVerifying all sources restored..."
 $verify = & dotnet test --nologo 2>&1 | Out-String
