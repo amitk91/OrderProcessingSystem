@@ -1,0 +1,269 @@
+### Order Processing API — sample requests
+### Run the API first:  dotnet run --project src/OrderProcessing.Api
+### Then execute these top to bottom. VS Code needs the REST Client extension.
+
+@host = http://localhost:5000
+@api = {{host}}/api/v1
+
+### Seeded identifiers (see DatabaseSeeder)
+@alice = 11111111-1111-1111-1111-111111111111
+@bob = 22222222-2222-2222-2222-222222222222
+@admin = 33333333-3333-3333-3333-333333333333
+@keyboard = aaaaaaaa-0000-0000-0000-000000000001
+@mouse = aaaaaaaa-0000-0000-0000-000000000002
+@discontinued = aaaaaaaa-0000-0000-0000-000000000005
+
+###############################################################################
+# 1. Authentication — development token endpoint
+###############################################################################
+
+### Get a customer token (Alice)
+# @name aliceToken
+POST {{api}}/dev/token
+Content-Type: application/json
+
+{ "userId": "{{alice}}", "role": "Customer", "email": "alice@example.com" }
+
+### Get a second customer token (Bob) — used to prove data isolation
+# @name bobToken
+POST {{api}}/dev/token
+Content-Type: application/json
+
+{ "userId": "{{bob}}", "role": "Customer", "email": "bob@example.com" }
+
+### Get an admin token
+# @name adminToken
+POST {{api}}/dev/token
+Content-Type: application/json
+
+{ "userId": "{{admin}}", "role": "Admin", "email": "admin@example.com" }
+
+@alice_jwt = {{aliceToken.response.body.token}}
+@bob_jwt = {{bobToken.response.body.token}}
+@admin_jwt = {{adminToken.response.body.token}}
+
+###############################################################################
+# 2. Catalogue
+###############################################################################
+
+### Browse products
+GET {{api}}/products
+Authorization: Bearer {{alice_jwt}}
+
+###############################################################################
+# 3. Creating orders (FR-1)
+###############################################################################
+
+### Place an order with two items — total is computed server-side (119.97)
+# @name newOrder
+POST {{api}}/orders
+Authorization: Bearer {{alice_jwt}}
+Content-Type: application/json
+
+{
+  "items": [
+    { "productId": "{{keyboard}}", "quantity": 2 },
+    { "productId": "{{mouse}}", "quantity": 1 }
+  ]
+}
+
+@orderId = {{newOrder.response.body.id}}
+
+### Price tampering is ignored — unitPrice in the body has no effect (FR-1.6)
+POST {{api}}/orders
+Authorization: Bearer {{alice_jwt}}
+Content-Type: application/json
+
+{ "items": [ { "productId": "{{keyboard}}", "quantity": 1, "unitPrice": 0.01 } ] }
+
+### Duplicate products are merged into one line of quantity 5 (FR-1.8)
+POST {{api}}/orders
+Authorization: Bearer {{alice_jwt}}
+Content-Type: application/json
+
+{
+  "items": [
+    { "productId": "{{mouse}}", "quantity": 2 },
+    { "productId": "{{mouse}}", "quantity": 3 }
+  ]
+}
+
+### Idempotency — run this twice; the second call returns 200 with the same order
+POST {{api}}/orders
+Authorization: Bearer {{alice_jwt}}
+Idempotency-Key: demo-key-001
+Content-Type: application/json
+
+{ "items": [ { "productId": "{{mouse}}", "quantity": 1 } ] }
+
+### An empty order is rejected (400)
+POST {{api}}/orders
+Authorization: Bearer {{alice_jwt}}
+Content-Type: application/json
+
+{ "items": [] }
+
+### An inactive product is rejected (422)
+POST {{api}}/orders
+Authorization: Bearer {{alice_jwt}}
+Content-Type: application/json
+
+{ "items": [ { "productId": "{{discontinued}}", "quantity": 1 } ] }
+
+###############################################################################
+# 4. Reading orders (FR-2, FR-4)
+###############################################################################
+
+### Retrieve one order, including its audit trail
+GET {{api}}/orders/{{orderId}}
+Authorization: Bearer {{alice_jwt}}
+
+### List orders, newest first
+GET {{api}}/orders?pageSize=10
+Authorization: Bearer {{alice_jwt}}
+
+### Filter by status
+GET {{api}}/orders?status=PENDING
+Authorization: Bearer {{alice_jwt}}
+
+### Sort by total ascending — numeric, not lexicographic
+GET {{api}}/orders?sortBy=totalAmount&desc=false
+Authorization: Bearer {{alice_jwt}}
+
+### An oversized page size is clamped to 100 rather than rejected (FR-4.6)
+GET {{api}}/orders?pageSize=10000
+Authorization: Bearer {{alice_jwt}}
+
+### An unrecognised status is rejected with guidance (400)
+GET {{api}}/orders?status=NONSENSE
+Authorization: Bearer {{alice_jwt}}
+
+###############################################################################
+# 5. Security — these are the interesting ones
+###############################################################################
+
+### Bob requests Alice's order -> 404, not 403 (no existence disclosure)
+GET {{api}}/orders/{{orderId}}
+Authorization: Bearer {{bob_jwt}}
+
+### Alice tries to widen her scope to Bob's orders -> parameter ignored
+GET {{api}}/orders?customerId={{bob}}
+Authorization: Bearer {{alice_jwt}}
+
+### A customer calling the admin status endpoint -> 403
+PATCH {{api}}/orders/{{orderId}}/status
+Authorization: Bearer {{alice_jwt}}
+Content-Type: application/json
+
+{ "status": "DELIVERED" }
+
+### No token at all -> 401
+GET {{api}}/orders
+
+###############################################################################
+# 6. Status transitions (FR-3)
+###############################################################################
+
+### Admin advances the order to PROCESSING
+PATCH {{api}}/orders/{{orderId}}/status
+Authorization: Bearer {{admin_jwt}}
+Content-Type: application/json
+
+{ "status": "PROCESSING" }
+
+### Admin ships it
+PATCH {{api}}/orders/{{orderId}}/status
+Authorization: Bearer {{admin_jwt}}
+Content-Type: application/json
+
+{ "status": "SHIPPED" }
+
+### Admin marks it delivered
+PATCH {{api}}/orders/{{orderId}}/status
+Authorization: Bearer {{admin_jwt}}
+Content-Type: application/json
+
+{ "status": "DELIVERED" }
+
+### A skip transition is rejected with 409 and lists what was permitted
+PATCH {{api}}/orders/{{orderId}}/status
+Authorization: Bearer {{admin_jwt}}
+Content-Type: application/json
+
+{ "status": "PENDING" }
+
+###############################################################################
+# 7. Cancellation (FR-5)
+###############################################################################
+
+### Create a fresh order to cancel
+# @name cancellable
+POST {{api}}/orders
+Authorization: Bearer {{alice_jwt}}
+Content-Type: application/json
+
+{ "items": [ { "productId": "{{keyboard}}", "quantity": 1 } ] }
+
+@cancelId = {{cancellable.response.body.id}}
+
+### Customer cancels their own pending order
+POST {{api}}/orders/{{cancelId}}/cancel
+Authorization: Bearer {{alice_jwt}}
+Content-Type: application/json
+
+{}
+
+### Re-cancelling is an idempotent no-op; the original audit data is preserved
+POST {{api}}/orders/{{cancelId}}/cancel
+Authorization: Bearer {{admin_jwt}}
+Content-Type: application/json
+
+{ "reason": "Admin override attempt" }
+
+### Create another, advance it, then try to cancel as the customer -> 409
+# @name processing
+POST {{api}}/orders
+Authorization: Bearer {{alice_jwt}}
+Content-Type: application/json
+
+{ "items": [ { "productId": "{{mouse}}", "quantity": 1 } ] }
+
+@processingId = {{processing.response.body.id}}
+
+###
+PATCH {{api}}/orders/{{processingId}}/status
+Authorization: Bearer {{admin_jwt}}
+Content-Type: application/json
+
+{ "status": "PROCESSING" }
+
+### Customer cannot cancel a processing order -> 409
+POST {{api}}/orders/{{processingId}}/cancel
+Authorization: Bearer {{alice_jwt}}
+Content-Type: application/json
+
+{}
+
+### Admin cancelling without a reason -> 400
+POST {{api}}/orders/{{processingId}}/cancel
+Authorization: Bearer {{admin_jwt}}
+Content-Type: application/json
+
+{}
+
+### Admin cancelling with a reason -> 200
+POST {{api}}/orders/{{processingId}}/cancel
+Authorization: Bearer {{admin_jwt}}
+Content-Type: application/json
+
+{ "reason": "Payment failed on capture" }
+
+###############################################################################
+# 8. Health
+###############################################################################
+
+### Liveness
+GET {{host}}/health/live
+
+### Readiness (includes a database probe)
+GET {{host}}/health/ready

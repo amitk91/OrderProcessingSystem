@@ -7,6 +7,9 @@ every five minutes.
 Built with .NET 10, ASP.NET Core, EF Core and SQLite. **No Docker, no database server, no cloud
 resources** — clone it and run it.
 
+> **Looking for endpoint details?** The full HTTP contract — request and response schemas, query
+> parameters, status codes and error format — is in **[docs/API.md](./docs/API.md)**.
+
 ---
 
 ## Quick start
@@ -36,8 +39,8 @@ curl -X POST http://localhost:5000/api/v1/dev/token \
   -d '{"userId":"11111111-1111-1111-1111-111111111111","role":"Customer","email":"alice@example.com"}'
 ```
 
-Paste the token into Swagger's **Authorize** box, or use [`requests.http`](./requests.http), which
-walks the entire feature set end to end — including the security cases.
+Paste it into Swagger's **Authorize** box, or use [`requests.http`](./requests.http), which walks
+the entire feature set end to end — including the security cases.
 
 **Seeded identities**
 
@@ -51,41 +54,49 @@ Five products are seeded, one deliberately inactive so the rejection path can be
 
 ---
 
-## API
+## What the system does
 
-Base path `/api/v1`. All endpoints require authentication except health checks and the dev token.
+### Placing an order
 
-| Method | Path | Who | Purpose |
-| --- | --- | --- | --- |
-| `POST` | `/orders` | Customer | Place an order (supports `Idempotency-Key`) |
-| `GET` | `/orders/{id}` | Owner / Admin | Retrieve an order with its audit trail |
-| `GET` | `/orders` | Owner / Admin | List with filtering, sorting, pagination |
-| `PATCH` | `/orders/{id}/status` | **Admin** | Transition status |
-| `POST` | `/orders/{id}/cancel` | Owner / Admin | Cancel |
-| `GET` | `/products` | Any | Browse the catalogue |
-| `GET` | `/health/live`, `/health/ready` | Anonymous | Health probes |
-| `POST` | `/dev/token` | Anonymous | **Development only** |
+A customer submits a list of products and quantities. Prices are **resolved from the catalogue**,
+never taken from the request, so a caller cannot influence what it is charged. Line totals and the
+order total are computed server-side. Duplicate products in one request are merged into a single
+line with the quantities summed.
 
-Errors use RFC 7807 `ProblemDetails` with a correlation id. A rejected transition also returns the
-transitions that *were* available, so the error is actionable:
+Every order starts in `PENDING` and receives a human-readable number such as `ORD-2026-000042`.
 
-```json
-{
-  "type": "https://orderprocessing/errors/invalid-status-transition",
-  "title": "Invalid status transition",
-  "status": 409,
-  "detail": "Cannot transition order from Pending to Delivered as Admin; permitted transitions are: Processing, Cancelled.",
-  "permittedTransitions": ["PROCESSING", "CANCELLED"],
-  "correlationId": "0HNOR1BMF04TF"
-}
-```
+Creation is **idempotent** when the client supplies an `Idempotency-Key`: a double-tapped checkout
+button or a retry after a network timeout returns the original order rather than creating a second
+one.
+
+### Tracking an order
+
+An order can be fetched by id, or listed with filtering by status, sorting by creation date or
+total, and pagination. Every order carries a complete **audit trail** recording each status change,
+who made it, when, and why.
+
+### Moving an order through fulfilment
+
+`PENDING → PROCESSING → SHIPPED → DELIVERED`, with `CANCELLED` reachable before dispatch. Every
+transition is governed by the matrix below.
+
+### Cancelling an order
+
+Customers may cancel while an order is still `PENDING`. Administrators may also cancel while it is
+`PROCESSING`, and must give a reason. Cancellation records who did it, when, and why.
+
+### Automatic promotion
+
+A background job runs every five minutes and promotes pending orders to processing. Promotions are
+attributed to `SYSTEM` in the audit trail. Orders cancelled before a run are never promoted.
 
 ---
 
-## Design decisions
+## Behavioural rules
 
 The brief is five bullet points. Most of the engineering is in the decisions it does not mention.
-Full reasoning is in [docs/SPECIFICATION.md](./docs/SPECIFICATION.md); the highlights:
+Full reasoning is in [docs/SPECIFICATION.md](./docs/SPECIFICATION.md); the ones that shape
+behaviour:
 
 ### The state machine is role-aware
 
@@ -291,7 +302,8 @@ multi-currency. Each is a subsystem in its own right; see
 
 | Document | Contents |
 | --- | --- |
-| [docs/SPECIFICATION.md](./docs/SPECIFICATION.md) | Full design spec: ~50 numbered requirements, API contract, security model, NFRs, decision log |
+| **[docs/API.md](./docs/API.md)** | **Full HTTP reference** — endpoints, schemas, query parameters, status codes, error codes |
+| [docs/SPECIFICATION.md](./docs/SPECIFICATION.md) | Design spec: ~50 numbered requirements, domain model, security model, NFRs, decision log |
 | [docs/AI-USAGE.md](./docs/AI-USAGE.md) | Required AI-usage log — what AI was used for, what it got wrong, how it was corrected |
 | [requests.http](./requests.http) | Executable walkthrough of every feature, including security cases |
 

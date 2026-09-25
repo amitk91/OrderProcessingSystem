@@ -665,6 +665,10 @@ considerably more disruptive than adopting it on day one.
 
 ## 11. API contract
 
+> The complete reference — request and response schemas, every query parameter, all status and
+> error codes — lives in [API.md](./API.md). This section records the shape of the contract and the
+> reasoning behind it.
+
 Base path `/api/v1`. All endpoints require authentication unless stated otherwise.
 
 | Method | Path | Role | Purpose |
@@ -880,10 +884,11 @@ containers, no service definitions and no secrets, and runs on a stock runner.
 
 ```
 /docs/SPECIFICATION.md     — this document
+/docs/API.md               — HTTP reference: endpoints, schemas, status codes (§11)
 /docs/AI-USAGE.md          — required AI-usage log (§14)
 /src, /tests               — as per §4
 /requests.http             — sample requests covering the full lifecycle
-/README.md                 — quick start, design decisions, trade-offs, known limitations
+/README.md                 — quick start, functional overview, trade-offs, known limitations
 ```
 
 ---
