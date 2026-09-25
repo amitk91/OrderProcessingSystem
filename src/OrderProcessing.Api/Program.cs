@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
 using OrderProcessing.Api.Middleware;
+using OrderProcessing.Application;
 using OrderProcessing.Infrastructure;
 using OrderProcessing.Infrastructure.Persistence;
 using Serilog;
@@ -14,6 +15,7 @@ builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Services(services)
     .Enrich.FromLogContext());
 
+builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
 
 builder.Services.AddControllers();

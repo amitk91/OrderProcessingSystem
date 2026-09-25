@@ -27,14 +27,3 @@ public sealed class JwtOptions
     public TimeSpan TokenLifetime { get; set; } = TimeSpan.FromHours(8);
 }
 
-/// <summary>
-/// Claim types and role names used across the API.
-/// </summary>
-public static class AuthConstants
-{
-    public const string CustomerRole = "Customer";
-    public const string AdminRole = "Admin";
-
-    /// <summary>Policy requiring the caller to be an administrator.</summary>
-    public const string AdminOnlyPolicy = "AdminOnly";
-}

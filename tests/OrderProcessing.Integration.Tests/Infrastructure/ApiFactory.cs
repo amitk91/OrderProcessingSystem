@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using OrderProcessing.Application.Abstractions;
 using OrderProcessing.Infrastructure.Persistence;
 using OrderProcessing.Infrastructure.Security;
 

@@ -150,18 +150,34 @@ infrastructure is a primary evaluation criterion.
 src/
   OrderProcessing.Domain/          — entities, Money value object, state machine, domain errors
                                      (no external dependencies)
-  OrderProcessing.Application/     — use cases, DTOs, port interfaces (IOrderRepository,
-                                     IPendingOrderClaimer, IUnitOfWork), validators
-  OrderProcessing.Infrastructure/  — EF Core + SQLite, repositories, claim adapter, auth,
-                                     background job
-  OrderProcessing.Api/             — controllers, middleware, composition root
+  OrderProcessing.Application/     — use cases (OrderService, OrderPromotionService), DTOs,
+                                     port interfaces (IOrderRepository, IProductCatalog,
+                                     IPendingOrderClaimer, IOrderNumberGenerator), OrderScope
+  OrderProcessing.Infrastructure/  — EF Core + SQLite adapters, claim adapter, auth,
+                                     background-job host
+  OrderProcessing.Api/             — controllers, middleware, claims mapping, composition root
 tests/
-  OrderProcessing.Domain.Tests/        — fast, no I/O
-  OrderProcessing.Application.Tests/   — use cases against test doubles
+  OrderProcessing.Domain.Tests/        — domain rules and architecture rules, no I/O
+  OrderProcessing.Application.Tests/   — use cases against substituted ports, no database
   OrderProcessing.Integration.Tests/   — full stack against a real SQLite database
 ```
 
-**Dependency rule:** `Api → Infrastructure → Application → Domain`. The domain references nothing.
+**Dependency rule:** `Api → Infrastructure → Application → Domain`. The domain references nothing,
+and the application layer references no persistence or web library — only ports it defines itself.
+
+**Enforced, not merely documented.** `ArchitectureTests` asserts the dependency rule at build time:
+the domain and application assemblies are checked for EF Core, ASP.NET and provider references, and
+the order use cases are asserted to live in the application assembly. A layer name is a claim, and
+claims need tests — an earlier revision of this solution placed `OrderService` in infrastructure
+while this document described it as an application concern, and nothing caught the divergence.
+
+**Where responsibilities sit.** The promotion job is the clearest illustration of the split:
+
+| Decision | Layer | Type |
+| --- | --- | --- |
+| *When* a run happens | Infrastructure | `OrderPromotionBackgroundService` (timer, host lifetime, scope) |
+| *What* a run does | Application | `OrderPromotionService` (batching, failure isolation, audit) |
+| *How* rows are claimed | Infrastructure | `SqlitePendingOrderClaimer` (provider-specific SQL) |
 
 **Why the ports matter here.** The zero-infrastructure constraint (§3.2) makes this layering
 load-bearing rather than decorative: the database-specific parts of the design — the claim
@@ -169,8 +185,10 @@ strategy (§9.3) and the concurrency token (§10.2) — are exactly the parts th
 SQLite and PostgreSQL. Confining them behind ports is what keeps the domain, the use cases and
 the test suite identical across both.
 
-**Transaction boundary:** one transaction per use case, opened in the application layer via a
-unit-of-work abstraction. The background job uses one transaction *per batch* (§9.4).
+**Transaction boundary:** one transaction per use case, committed through
+`IOrderRepository.SaveChangesAsync`. The background job uses one transaction *per batch* (§9.4).
+Provider concurrency exceptions are translated to `ConcurrencyConflictException` at the repository
+boundary, so no layer above persistence needs to know which ORM is in use.
 
 ---
 
@@ -810,7 +828,7 @@ Test data is built with the builder pattern to keep intent legible. Tests are in
 parallelizable. No `Thread.Sleep` anywhere — time is always controlled through `TimeProvider`, so
 a five-minute schedule is verified in milliseconds.
 
-**Delivered:** 269 tests (217 domain, 52 integration), all passing.
+**Delivered:** 295 tests (222 domain including architecture rules, 21 application, 52 integration), all passing.
 
 ### 12.4 Verifying that the tests can fail
 

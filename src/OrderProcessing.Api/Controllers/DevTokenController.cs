@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using OrderProcessing.Api.Contracts;
+using OrderProcessing.Application.Abstractions;
 using OrderProcessing.Infrastructure.Security;
 
 namespace OrderProcessing.Api.Controllers;

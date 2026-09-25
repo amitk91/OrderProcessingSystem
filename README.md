@@ -24,7 +24,7 @@ The database is created, migrated and seeded on first run. No configuration, no 
 connection string to set.
 
 ```bash
-dotnet test        # 269 tests, no external dependencies
+dotnet test        # 295 tests, no external dependencies
 ```
 
 To reset everything, delete `src/OrderProcessing.Api/orders.db` and restart.
@@ -132,15 +132,23 @@ Conflating these is the most common source of access-control bugs:
 3. **Ownership** — *may this actor touch this row?* Passing (2) but failing (3) is the
    IDOR / Broken Object-Level Authorization defect, top of the OWASP API Security Top 10.
 
-Ownership is enforced by **scoping the query**, not by loading a row and comparing ids afterwards:
+Ownership is enforced by **scoping the query**, not by loading a row and comparing ids afterwards.
+The caller's visibility is resolved once, into a value:
 
 ```csharp
-private static IQueryable<Order> ScopeToCaller(IQueryable<Order> source, Actor caller) =>
-    caller.IsAdmin ? source : source.Where(order => order.CustomerId == caller.UserId);
+public static OrderScope For(Actor caller) =>
+    caller.IsAdmin ? All : ForCustomer(caller.UserId);
 ```
 
-Fetch-then-compare works until someone adds an endpoint and forgets the check. Query-scoping is
-fail-closed: omitting it returns *nothing*, not *everything*.
+…and every read on the repository port takes that scope as a **required parameter**:
+
+```csharp
+Task<Order?> FindAsync(Guid orderId, OrderScope scope, CancellationToken ct);
+```
+
+There is no overload that omits it, so a new call site cannot silently query across customers —
+**the compiler enforces it, not code review.** That is what makes the design fail-closed; a helper
+you are merely *expected* to remember to call is not.
 
 **Another customer's order returns `404`, not `403`.** A `403` confirms the order exists, which
 lets an attacker enumerate ids. `404` reveals nothing. `403` is still used where the *operation* is
@@ -204,11 +212,12 @@ timing-dependent — and covered by a test that runs both operations concurrentl
 
 ## Testing
 
-**269 tests**, all against a real SQLite database.
+**295 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
 
 | Suite | Count | Scope |
 | --- | --- | --- |
-| Domain | 217 | State machine, `Money`, aggregate invariants, clock |
+| Domain | 222 | State machine, `Money`, aggregate invariants, clock, **architecture rules** |
+| Application | 21 | Use cases against substituted ports — **no database, no host** |
 | Integration | 52 | Full HTTP stack, security, scheduler, concurrency |
 
 Not the EF Core InMemory provider: it enforces no unique constraints, foreign keys or check
@@ -253,19 +262,36 @@ test in a second instead of a stuck build.
 ```
 src/
   OrderProcessing.Domain/          entities, Money, state machine   (no dependencies)
-  OrderProcessing.Application/     use cases, DTOs, ports
-  OrderProcessing.Infrastructure/  EF Core, repositories, auth, scheduler
+  OrderProcessing.Application/     use cases + ports  (no EF Core, no ASP.NET)
+  OrderProcessing.Infrastructure/  EF adapters, auth, scheduler host
   OrderProcessing.Api/             controllers, middleware, composition root
 tests/
-  OrderProcessing.Domain.Tests/        fast, no I/O
+  OrderProcessing.Domain.Tests/        domain + architecture rules, no I/O
   OrderProcessing.Integration.Tests/   full stack, real SQLite
 ```
 
 Dependencies point inward: `Api → Infrastructure → Application → Domain`. The domain references
 nothing.
 
-The layering is load-bearing rather than decorative here: the two database-specific pieces — the
-claim strategy and the concurrency token — are exactly the parts that differ between SQLite and
+**Where the code actually lives**, since this is the part that is easy to get wrong:
+
+| Concern | Project | Why |
+| --- | --- | --- |
+| `Order`, `Money`, transition matrix | Domain | Invariants, no dependencies |
+| `OrderService`, `OrderPromotionService` | **Application** | Use cases — orchestration belongs above infrastructure |
+| `IOrderRepository`, `IProductCatalog`, `OrderScope` | **Application** | Ports are owned by the layer that *needs* them |
+| `EfOrderRepository`, `EfProductCatalog` | Infrastructure | Adapters implementing those ports |
+| `OrderPromotionBackgroundService` | Infrastructure | *When* to run is a hosting concern |
+| `ClaimsPrincipal → Actor` mapping | Api | `ClaimsPrincipal` is an ASP.NET type |
+
+The promotion job is the clearest illustration: Infrastructure owns the timer and service scope,
+Application owns what a run does, and Infrastructure again owns *how* rows are claimed behind
+`IPendingOrderClaimer`. No `IQueryable` or `DbContext` crosses into Application.
+
+This is enforced by tests, not just documented — see `ArchitectureTests`.
+
+The layering is load-bearing rather than decorative: the two database-specific pieces — the claim
+strategy and the concurrency token — are exactly the parts that differ between SQLite and
 PostgreSQL. Confining them behind ports keeps the domain, the use cases and every test identical
 across both.
 

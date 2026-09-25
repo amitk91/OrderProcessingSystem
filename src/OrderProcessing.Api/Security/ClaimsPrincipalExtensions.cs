@@ -1,17 +1,22 @@
 using System.Security.Claims;
+using OrderProcessing.Application.Abstractions;
 using OrderProcessing.Domain.Orders;
 
-namespace OrderProcessing.Infrastructure.Security;
+namespace OrderProcessing.Api.Security;
 
 /// <summary>
-/// Builds a domain <see cref="Actor"/> from the authenticated principal.
+/// Maps the authenticated principal onto a domain <see cref="Actor"/>.
 /// </summary>
 /// <remarks>
-/// The single place where transport-level identity becomes domain identity. Keeping
-/// it in one method means no controller can invent an actor from request data — the
-/// role and user id always originate in the validated token.
+/// Lives in the API layer because <see cref="ClaimsPrincipal"/> is an ASP.NET concern:
+/// the application layer takes an <see cref="Actor"/> and knows nothing about how the
+/// caller was authenticated.
+///
+/// This is also the single place where transport identity becomes domain identity, so
+/// no controller can invent an actor from request data — the role and user id always
+/// originate in the validated token.
 /// </remarks>
-public static class ClaimsPrincipalExtensions
+internal static class ClaimsPrincipalExtensions
 {
     public static Actor ToActor(this ClaimsPrincipal principal)
     {
@@ -34,11 +39,5 @@ public static class ClaimsPrincipalExtensions
         return Guid.TryParse(subject, out var userId)
             ? userId
             : throw new InvalidOperationException("The authenticated principal has no usable subject claim.");
-    }
-
-    public static bool IsAdmin(this ClaimsPrincipal principal)
-    {
-        ArgumentNullException.ThrowIfNull(principal);
-        return principal.IsInRole(AuthConstants.AdminRole);
     }
 }

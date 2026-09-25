@@ -42,3 +42,22 @@ public sealed class IdempotencyKeyConflictException(string key)
 {
     public override string ErrorCode => "idempotency-key-conflict";
 }
+
+/// <summary>
+/// Raised when a concurrent transaction modified the same order first
+/// (specification section 10.2).
+/// </summary>
+/// <remarks>
+/// Translated from the persistence provider's own concurrency exception at the
+/// repository boundary, so neither the application layer nor the API needs to know
+/// which ORM is in use to handle a conflict.
+/// </remarks>
+public sealed class ConcurrencyConflictException(Guid orderId, Exception innerException)
+    : DomainException(
+        $"Order '{orderId}' was modified by another request. Reload it and retry.",
+        innerException)
+{
+    public Guid OrderId { get; } = orderId;
+
+    public override string ErrorCode => "concurrency-conflict";
+}

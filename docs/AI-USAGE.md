@@ -355,6 +355,100 @@ the system and deliberately trying to break it.
 The rule that came out of this project: treat AI output as a confident first draft from someone who
 has never run the program.
 
+### Entry 10 — A code review found the architecture claim was false
+
+**Task.** A reviewer's first finding: *"Your use cases live in Infrastructure, not Application.
+`OrderService` — the actual orchestration layer — sits in `OrderProcessing.Infrastructure.Orders`,
+while `OrderProcessing.Application` contains only two interfaces and some DTOs. Why is your
+business orchestration in the infrastructure project?"*
+
+**Verification.** The criticism was correct and easy to confirm. The Application project contained
+**four files**: two port interfaces, an exceptions file and a DTO file. No use cases. And
+`OrdersController` imported `OrderProcessing.Infrastructure.Orders` directly.
+
+**Root cause.** `OrderService` needed a `DbContext`, so it was placed where the `DbContext` lives.
+That is the whole mistake in one sentence: **the dependency dragged the use case into
+infrastructure instead of being inverted.** The layer names then described an intention rather
+than the code, which is worse than having no layer names — the README asserted a shape the
+solution did not have.
+
+The assistant had also produced a trade-off note in the README justifying the absence of a
+repository abstraction ("`DbContext` already *is* Repository + Unit of Work; wrapping it is
+ceremony"). That argument is only valid if the use cases live in infrastructure. Once they must
+move, the abstraction stops being ceremony and becomes the mechanism that lets them move. A
+plausible-sounding justification for the wrong structure is a failure mode worth noting: it reads
+as considered design, and it survived my own review.
+
+**Correction.** Moved orchestration to where it belongs:
+
+| Moved | From | To |
+| --- | --- | --- |
+| `OrderService` | Infrastructure | **Application** |
+| `OrderPromotionService` | Infrastructure | **Application** |
+| `ClaimsPrincipal → Actor` | Infrastructure | **Api** (it is an ASP.NET type) |
+| `AuthConstants` | Infrastructure | **Application** (shared by Api and DI) |
+
+Added `IOrderRepository`, `IProductCatalog` and `OrderScope` as application-owned ports, with
+`EfOrderRepository` / `EfProductCatalog` as infrastructure adapters. No `IQueryable` or
+`DbContext` now crosses into Application, and `DbUpdateConcurrencyException` is translated into a
+domain-level `ConcurrencyConflictException` at the repository boundary so the API no longer needs
+to know which ORM is in use.
+
+**A second, quieter defect the same review exposed.** The README claimed query scoping was
+"fail-closed: omitting it returns *nothing*, not *everything*." That was simply untrue of the old
+code — `ScopeToCaller` was a helper you had to remember to call, and forgetting it returned **every
+customer's orders**. An overstated security claim is worse than an absent one.
+
+The refactor made the claim true rather than merely softening it: `OrderScope` is now a **required
+parameter** on every repository read. There is no overload that omits it, so the compiler enforces
+what a naming convention previously only suggested.
+
+**A bug I introduced during the refactor.** Moving the change-tracker reset into
+`AddStatusHistory` put `ChangeTracker.Clear()` *before* `SaveChangesAsync`, which discarded the
+very audit rows being added. One integration test caught it immediately —
+`A_promotion_is_recorded_in_the_audit_trail_as_a_system_action`. Clearing now happens before the
+add, which satisfies both intents. Worth recording because it is the case *for* having tests that
+assert on the audit trail rather than only on final status.
+
+**Preventing recurrence.** Two things, not one.
+
+*First*, `ArchitectureTests` — five assertions that fail the build if the domain or application
+layer acquires a persistence or web dependency, or if the use cases drift back out of Application.
+Mutation-verified: introducing an EF Core type into `OrderService` fails the suite.
+
+The first mutation attempt was instructive. Merely adding an unused `PackageReference` did **not**
+fail the test, because `GetReferencedAssemblies` reports only assemblies the compiler actually
+bound to. That is arguably the right sensitivity — an unused reference is inert, while a single
+`DbContext` parameter in a use case breaks substitutability — but the limitation is now documented
+on the test rather than left as an unexamined assumption.
+
+*Second*, and more telling: the previously-empty `OrderProcessing.Application.Tests` project now
+holds **21 unit tests** covering the order use cases against substituted ports — no database, no
+migrations, no host. Those tests were impossible to write before the refactor, because the use
+cases needed a `DbContext`. Their existence is the concrete payoff of the dependency rule, and
+their absence was a signal I had not read: *an empty application-test project is evidence that
+there is no application layer to test.*
+
+Several of them assert on security behaviour that integration tests can only observe indirectly —
+for example that a customer's list request reaches the repository with the caller's own scope and
+a discarded `customerId`, rather than merely that the response contained no foreign rows.
+
+**A note on the specification.** Checking §4 afterwards produced an uncomfortable finding: the
+specification had described the correct structure all along, naming `IOrderRepository` and placing
+use cases in Application. The implementation simply diverged from it, and nothing — not the
+document, not my review, not the test suite — noticed. A specification is only as good as the
+mechanism that checks the code still matches it, which is now `ArchitectureTests`.
+
+**Why this entry matters most.** Every earlier entry describes a bug in code. This one is a defect
+in **architecture**, and it survived the specification phase, the implementation, my own review,
+and a written architectural explanation. It was found by an outside reader asking one direct
+question about where a class lived. The AI produced the structure I asked for and then described it
+as clean architecture; neither of us checked whether the description matched the directory it had
+been written into.
+
+The generalisable lesson: **layer names are claims, and claims need tests.** A README asserting a
+dependency rule proves nothing. `ArchitectureTests` does.
+
 ---
 
 ## Summary

@@ -29,7 +29,6 @@ public static class DependencyInjection
         services.AddScheduling(configuration);
         services.AddSecurity(configuration);
 
-        services.AddScoped<OrderService>();
         services.TryAddSingletonTimeProvider();
 
         return services;
@@ -48,6 +47,10 @@ public static class DependencyInjection
                 sqlite.MigrationsAssembly(typeof(OrderProcessingDbContext).Assembly.FullName));
         });
 
+        // Ports defined in the application layer, implemented here. This is the
+        // dependency inversion that keeps use cases free of EF Core.
+        services.AddScoped<IOrderRepository, EfOrderRepository>();
+        services.AddScoped<IProductCatalog, EfProductCatalog>();
         services.AddScoped<IOrderNumberGenerator, OrderNumberGenerator>();
 
         return services;
@@ -63,7 +66,6 @@ public static class DependencyInjection
             .ValidateOnStart();
 
         services.AddScoped<IPendingOrderClaimer, SqlitePendingOrderClaimer>();
-        services.AddScoped<OrderPromotionService>();
         services.AddHostedService<OrderPromotionBackgroundService>();
 
         return services;

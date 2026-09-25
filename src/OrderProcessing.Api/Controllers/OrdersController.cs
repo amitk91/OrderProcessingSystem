@@ -1,10 +1,10 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using OrderProcessing.Api.Contracts;
+using OrderProcessing.Api.Security;
+using OrderProcessing.Application.Abstractions;
 using OrderProcessing.Application.Orders;
 using OrderProcessing.Domain.Orders;
-using OrderProcessing.Infrastructure.Orders;
-using OrderProcessing.Infrastructure.Security;
 
 namespace OrderProcessing.Api.Controllers;
 

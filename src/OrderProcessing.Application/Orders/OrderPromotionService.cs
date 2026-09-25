@@ -1,10 +1,8 @@
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using OrderProcessing.Application.Abstractions;
 using OrderProcessing.Domain.Orders;
-using OrderProcessing.Infrastructure.Persistence;
 
-namespace OrderProcessing.Infrastructure.Scheduling;
+namespace OrderProcessing.Application.Orders;
 
 /// <summary>
 /// Outcome of a single promotion run, used for logging and metrics (FR-6.8).
@@ -18,19 +16,26 @@ public readonly record struct PromotionRunResult(int Claimed, int Promoted, int 
 }
 
 /// <summary>
-/// Promotes pending orders to processing, in bounded batches
-/// (specification section 9.4).
+/// Promotes pending orders to processing in bounded batches (FR-6, specification
+/// section 9.4).
 /// </summary>
 /// <remarks>
-/// Separated from the hosted service so the work can be invoked directly in tests
-/// without starting a host or waiting on a timer.
-///
-/// The status-history rows are written here rather than in the claim statement because
-/// the claim is deliberately a single atomic SQL statement; history is appended for
-/// exactly the orders the claim reported, so the two cannot diverge.
+/// This is a use case, so it lives in the application layer alongside the others. The
+/// split from <c>OrderPromotionBackgroundService</c> is deliberate and is the clearest
+/// illustration of the layering:
+/// <list type="bullet">
+///   <item><b>Infrastructure</b> decides <em>when</em> to run — timers, host lifetime,
+///   service scopes.</item>
+///   <item><b>Application</b> (this type) decides <em>what</em> a run does — batching,
+///   failure isolation, audit entries.</item>
+///   <item><b>Infrastructure</b> again decides <em>how</em> to claim safely, behind
+///   <see cref="IPendingOrderClaimer"/>, because that is provider-specific.</item>
+/// </list>
+/// The practical payoff is that a run can be invoked directly in tests, with no host
+/// and no waiting on a clock.
 /// </remarks>
 public sealed class OrderPromotionService(
-    OrderProcessingDbContext dbContext,
+    IOrderRepository orders,
     IPendingOrderClaimer claimer,
     TimeProvider timeProvider,
     ILogger<OrderPromotionService> logger)
@@ -94,13 +99,8 @@ public sealed class OrderPromotionService(
             return (0, failed);
         }
 
-        dbContext.OrderStatusHistory.AddRange(historyEntries);
-        await dbContext.SaveChangesAsync(cancellationToken);
-
-        // Claimed rows were updated by raw SQL, so anything already tracked holds a
-        // stale status. Clearing the change tracker prevents a later read in this
-        // scope returning Pending for an order that is now Processing.
-        dbContext.ChangeTracker.Clear();
+        orders.AddStatusHistory(historyEntries);
+        await orders.SaveChangesAsync(cancellationToken);
 
         return (historyEntries.Count, failed);
     }

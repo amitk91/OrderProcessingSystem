@@ -1,7 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using OrderProcessing.Infrastructure.Persistence;
+using OrderProcessing.Application.Abstractions;
 
 namespace OrderProcessing.Api.Controllers;
 
@@ -11,11 +10,15 @@ public sealed record ProductDto(Guid Id, string Sku, string Name, decimal UnitPr
 /// <summary>
 /// Read-only catalogue access, so a client can discover product ids before ordering.
 /// </summary>
+/// <remarks>
+/// Depends on the <see cref="IProductCatalog"/> port rather than a <c>DbContext</c>, so
+/// the API project holds no persistence knowledge outside its composition root.
+/// </remarks>
 [ApiController]
 [Route("api/v1/products")]
 [Authorize]
 [Produces("application/json")]
-public sealed class ProductsController(OrderProcessingDbContext dbContext) : ControllerBase
+public sealed class ProductsController(IProductCatalog catalog) : ControllerBase
 {
     /// <summary>Lists catalogue products.</summary>
     /// <param name="includeInactive">
@@ -28,24 +31,16 @@ public sealed class ProductsController(OrderProcessingDbContext dbContext) : Con
         [FromQuery] bool includeInactive = false,
         CancellationToken cancellationToken = default)
     {
-        var query = dbContext.Products.AsNoTracking();
+        var products = await catalog.ListAsync(includeInactive, cancellationToken);
 
-        if (!includeInactive)
-        {
-            query = query.Where(product => product.IsActive);
-        }
-
-        var products = await query
-            .OrderBy(product => product.Name)
+        return Ok(products
             .Select(product => new ProductDto(
                 product.Id,
                 product.Sku,
                 product.Name,
-                product.UnitPriceMinor / 100m,
+                product.UnitPrice.Amount,
                 product.Currency,
                 product.IsActive))
-            .ToListAsync(cancellationToken);
-
-        return Ok(products);
+            .ToList());
     }
 }

@@ -3,7 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using OrderProcessing.Application.Abstractions;
 using OrderProcessing.Domain.Orders;
 using OrderProcessing.Infrastructure.Persistence;
-using OrderProcessing.Infrastructure.Scheduling;
+using OrderProcessing.Application.Orders;
 using OrderProcessing.Integration.Tests.Infrastructure;
 using Shouldly;
 

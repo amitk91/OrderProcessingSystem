@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using OrderProcessing.Application.Orders;
 
 namespace OrderProcessing.Infrastructure.Scheduling;
 
@@ -10,12 +11,16 @@ namespace OrderProcessing.Infrastructure.Scheduling;
 /// (FR-6.1, specification section 9).
 /// </summary>
 /// <remarks>
-/// Uses <see cref="TimeProvider.CreateTimer"/> rather than <c>DateTime.UtcNow</c> and a
-/// real <c>PeriodicTimer</c>, so tests can advance a fake clock and verify a five-minute
-/// schedule in milliseconds with no <c>Thread.Sleep</c> (specification section 9.2).
+/// A hosting concern, so it stays in infrastructure: it owns the timer, the host
+/// lifetime and the service scope, while the application layer owns what a run
+/// actually does.
 ///
-/// Runs never overlap: the timer is restarted only after the previous run finishes, so a
-/// run that outlives its interval delays the next tick instead of racing itself.
+/// Delays come from <see cref="TimeProvider"/> rather than a real
+/// <c>PeriodicTimer</c>, so tests can advance a fake clock and verify a five-minute
+/// schedule in milliseconds (specification section 9.2).
+///
+/// Runs never overlap: the next delay begins only after the previous run finishes, so
+/// a run that outlives its interval delays the next tick instead of racing itself.
 /// </remarks>
 internal sealed class OrderPromotionBackgroundService(
     IServiceScopeFactory scopeFactory,

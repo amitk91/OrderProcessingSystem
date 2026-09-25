@@ -18,7 +18,6 @@ internal static partial class PromotionLog
         Level = LogLevel.Information,
         Message = "Order promotion job started; interval {Interval}, batch size {BatchSize}.")]
     public static partial void JobStarted(ILogger logger, TimeSpan interval, int batchSize);
-
     [LoggerMessage(
         EventId = 1001,
         Level = LogLevel.Information,
@@ -61,10 +60,4 @@ internal static partial class PromotionLog
         Level = LogLevel.Debug,
         Message = "Claimed {ClaimedCount} pending orders for promotion.")]
     public static partial void OrdersClaimed(ILogger logger, int claimedCount);
-
-    [LoggerMessage(
-        EventId = 1007,
-        Level = LogLevel.Error,
-        Message = "Failed to record promotion history for order {OrderId}.")]
-    public static partial void PromotionHistoryFailed(ILogger logger, Guid orderId, Exception exception);
 }
