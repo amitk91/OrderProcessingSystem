@@ -892,27 +892,43 @@ all passing.
 
 ### 12.4 Verifying that the tests can fail
 
-A suite that has never been observed failing is an assumption, not evidence. Two guards were
-applied to the tests covering the central invariants.
+A suite that has never been observed failing is an assumption, not evidence. Two guards apply to
+the tests covering the central invariants.
 
 **Independently-declared expectations.** The transition matrix test enumerates all 75
 `(actor × from × to)` combinations and checks each against an expectation written longhand in the
 test file. Deriving those expectations from `OrderStatusTransitions` would be tautological — the
 test would pass for any implementation, including one that permitted every transition.
 
-**Mutation testing.** Each critical invariant was deliberately broken and the suite re-run:
+**A reproducible mutation audit.** `tools/mutation-audit.ps1` breaks each invariant in turn, runs
+the suite, restores the source and reports what failed. It is a script rather than a prose claim
+because a recorded mutation result describes the code as it was on the day it was run, and quietly
+stops being true when that code changes — which is exactly what happened here (see below).
 
-| Mutation applied | Outcome |
+| Invariant broken | Tests failed |
 | --- | --- |
-| Customers granted the admin cancellation window (§6.3) | 4 domain tests failed |
-| Claim statement's atomicity removed (§9.3) | 5 integration tests failed |
+| Promotion bypasses the transition matrix (§6.2) | 8 |
+| Order currency reverts to "first line wins" (§5.4) | 6 |
+| Customers granted the admin cancellation window (§6.3) | 5 |
+| Ownership scoping removed (§8.3) | 3 |
+| Claim drops the pending-status filter (§9.3) | 2 |
+| Unique-violation translation disabled (§11.2) | 2 |
+| Claim drops the lease guard (§9.3) | 0 |
 
-Both suites passed again once reverted.
+**On the zero.** Removing `AND "PromotionLease" IS NULL` from the claim statement fails no test
+because it changes no behaviour. The lease is cleared in the transaction that promotes, so no
+committed row carries one and the guard is always satisfied. Exactly-once claiming is provided by
+the write lock the claim takes plus the `Status = 'Pending'` filter; the lease exists so the claim
+can be expressed as a write without changing status, which is what keeps §6.2 authoritative. The
+guard is defence-in-depth against a future change that commits between claiming and promoting, and
+is retained on that basis.
 
-The second mutation also exposed a defect in the *tests*: the concurrent-worker loop was unbounded,
-so a claimer that never transitions rows caused the suite to hang rather than fail. The loop now
-carries an iteration cap and a descriptive failure, because a regression should produce a red test
-in seconds rather than a stuck build.
+**Why this section exists in its current form.** An earlier revision recorded *"breaking the claim
+statement's atomicity → 5 integration tests failed."* That was accurate when measured and became
+false when §9.3 was redesigned, because the statement it referred to no longer existed. Nothing
+flagged it: documentation evidence has no build step. Re-running the audit replaced a stale number
+with an accurate description of the mechanism — and revealed that the guarantee rests on something
+other than the clause the prose had credited.
 
 ### 12.5 Test-fidelity gap
 
@@ -966,6 +982,7 @@ containers, no service definitions and no secrets, and runs on a stock runner.
 /docs/AI-USAGE.md          — required AI-usage log (§14)
 /src, /tests               — as per §4
 /requests.http             — sample requests covering the full lifecycle
+/tools/mutation-audit.ps1  — reproducible mutation audit (§12.4)
 /README.md                 — quick start, functional overview, trade-offs, known limitations
 ```
 

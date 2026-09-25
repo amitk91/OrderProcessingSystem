@@ -14,17 +14,19 @@ resources** — clone it and run it.
 
 ## Quick start
 
+**Requires the .NET 10 SDK** ([download](https://dotnet.microsoft.com/download/dotnet/10.0)) — and
+nothing else. No Docker, no database server, no connection string.
+
 ```bash
 dotnet run --project src/OrderProcessing.Api
 ```
 
 Then open **<http://localhost:5000/swagger>**.
 
-The database is created, migrated and seeded on first run. No configuration, no containers, no
-connection string to set.
+The database is created, migrated and seeded on first run.
 
 ```bash
-dotnet test        # 323 tests, no external dependencies
+dotnet test        # 324 tests, no external dependencies
 ```
 
 To reset everything, delete `src/OrderProcessing.Api/orders.db` and restart.
@@ -268,13 +270,13 @@ situation the feature exists to survive.
 
 ## Testing
 
-**323 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
+**324 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
 
 | Suite | Count | Scope |
 | --- | --- | --- |
 | Domain | 225 | State machine, `Money`, aggregate invariants, clock, **architecture rules** |
 | Application | 21 | Use cases against substituted ports — **no database, no host** |
-| Integration | 77 | Full HTTP stack, security, scheduler, creation races, promotion integrity, currency, error mapping |
+| Integration | 78 | Full HTTP stack, security, scheduler, creation races, promotion integrity, currency, error mapping |
 
 Not the EF Core InMemory provider: it enforces no unique constraints, foreign keys or check
 constraints, so the idempotency and integrity tests would pass there without exercising anything. A
@@ -286,15 +288,43 @@ The transition matrix is verified across **all 75** `(actor × from × to)` comb
 against an expectation declared longhand in the test file. Deriving it from the production table
 would be tautological — it would pass for any implementation, including one permitting everything.
 
-Both critical invariants were **mutation-tested**:
+Critical invariants are **mutation-tested**, and the audit is reproducible rather than asserted:
 
-- Granting customers the admin cancellation window → **4 domain tests failed**
-- Breaking the claim statement's atomicity → **5 integration tests failed**
+```bash
+pwsh tools/mutation-audit.ps1
+```
 
-Both passed again on revert. A suite that has never been seen to fail is an assumption, not
-evidence.
+It breaks each invariant in turn, runs the suite, restores the source, and prints what failed.
+Most recent run against the current code:
 
-The mutation run also exposed a flaw in the tests themselves: an unbounded claim loop meant a
+| Invariant broken | Tests failed |
+| --- | --- |
+| Promotion bypasses the transition matrix | 8 |
+| Order currency reverts to "first line wins" | 6 |
+| Customers granted the admin cancellation window | 5 |
+| Ownership scoping removed (customers see every order) | 3 |
+| Claim drops the pending-status filter | 2 |
+| Unique-violation translation disabled for order numbers | 2 |
+| **Claim drops the lease guard** | **0** — see below |
+
+**The zero is the interesting row, and it is left in deliberately.** Removing
+`AND "PromotionLease" IS NULL` from the claim statement breaks no test, because under SQLite it
+breaks no behaviour. The lease is cleared in the same transaction that promotes, so no committed
+row ever carries one, and the guard is always trivially true.
+
+What actually provides exactly-once claiming here is the pair beneath it: the claim is a *write*,
+so SQLite's write lock serialises workers, and the `Status = 'Pending'` filter means a worker that
+was blocked finds those rows already promoted. The lease exists to make the claim expressible as a
+write *without* changing status — the separation that keeps the transition matrix authoritative —
+not to provide mutual exclusion on its own. The guard is defence-in-depth against a future change
+that commits between claiming and promoting.
+
+That row was originally reported as *"breaking the claim statement's atomicity → 5 integration
+tests failed."* True when written, and false as soon as the claim statement was redesigned: the
+statement it described no longer exists. Re-running the audit is what turned a stale number into
+an accurate characterisation of how the guarantee is actually achieved.
+
+The mutation runs also exposed a flaw in the tests themselves: an unbounded claim loop meant a
 broken implementation *hung* rather than failing. It is now bounded, so a regression produces a red
 test in a second instead of a stuck build.
 
@@ -391,6 +421,7 @@ multi-currency. Each is a subsystem in its own right; see
 | [docs/SPECIFICATION.md](./docs/SPECIFICATION.md) | Design spec: ~50 numbered requirements, domain model, security model, NFRs, decision log |
 | [docs/AI-USAGE.md](./docs/AI-USAGE.md) | Required AI-usage log — what AI was used for, what it got wrong, how it was corrected |
 | [requests.http](./requests.http) | Executable walkthrough of every feature, including security cases |
+| [tools/mutation-audit.ps1](./tools/mutation-audit.ps1) | Re-runs every mutation claim in this README against the current code |
 
 ---
 

@@ -345,6 +345,12 @@ code — a suite that hangs on regression is nearly as unhelpful as one that pas
 
 Both suites passed again on revert.
 
+> **Superseded — see Entry 14.** These numbers were accurate when measured, against the code as it
+> stood at this point in the project. The claim statement was later redesigned (Entry 11), so the
+> second mutation can no longer be performed as described. The figures are left here because this
+> log is a contemporaneous record rather than a summary, but the current, re-run results are in
+> `tools/mutation-audit.ps1` and §12.4 of the specification.
+
 **Observation on the division of labour.** The assistant was fast and broadly correct on structure —
 layering, EF configuration, DTO mapping, test scaffolding. Every genuine defect fell into one of two
 categories: **framework behaviour it could not observe** (the `Async` suffix stripping, the
@@ -639,6 +645,72 @@ exception and produce a 500, because that is what it is. Blanket-mapping `Argume
 domain and integration suites. Four new integration tests add a euro-priced product so the
 rejection is observed over HTTP — including one asserting that a consistent non-USD order still
 succeeds, so the fix cannot have over-corrected into rejecting all non-default currencies.
+
+### Entry 14 — Evidence has a shelf life
+
+**Task.** A fifth review point, this one about the documentation rather than the code: *"the
+mutation-testing claim now describes a mutation you can't perform any more. 'Breaking the claim
+statement's atomicity → 5 integration tests failed' was run against the old statement, which did
+the transition. The current statement only sets a lease… you haven't re-run the mutation against
+the new code, and the README presents it as evidence."*
+
+Plus a second, smaller one: the quick-start block never states the required SDK. It is in the
+intro, so a careful reader finds it; someone who skips to the commands meets a confusing failure.
+
+**Both correct, and the first is the more uncomfortable.** The number was honestly measured. It
+became false when Entry 11 redesigned the claim statement, and nothing flagged it — because
+**documentation evidence has no build step**. A stale test count is embarrassing; a stale claim that
+an invariant *was verified* is worse, because it is the kind of statement a reader has no way to
+check and every reason to trust.
+
+**Correction — re-run everything, not just the flagged claim.** If one recorded result had gone
+stale unnoticed, the others deserved the same suspicion. `tools/mutation-audit.ps1` now applies
+each mutation, runs the suite, restores the source regardless of outcome, and prints a table.
+
+The point is that it is a *script*, not a paragraph. A prose claim describes the code on the day it
+was written; a script describes the code on the day it is run. The reviewer's underlying complaint
+was not that the number was wrong but that it was unverifiable, and only the second form fixes
+that.
+
+**What re-running found.** The audit reported **zero** failures for the mutation nearest the
+original claim — removing the lease guard from the claim statement.
+
+That is not a gap to paper over; it is an accurate statement about the design, and I had the
+mechanism wrong in the prose. The lease is cleared in the same transaction that promotes, so no
+committed row ever carries one and the guard is always trivially true. Exactly-once claiming is
+provided by the write lock the claim takes and by the `Status = 'Pending'` filter. The lease exists
+so the claim can be expressed as a *write* without changing status — the separation that keeps the
+transition matrix authoritative — not to provide mutual exclusion by itself.
+
+So the README had been crediting the wrong clause for the guarantee. The zero row is kept in the
+published table with that explanation, because a mutation result that does not flatter the design
+is the most informative kind.
+
+**It also exposed a real coverage gap.** Nothing asserted the claim's actual contract, so I added
+`Claiming_only_ever_returns_orders_that_are_pending`. Verified by a new mutation — removing the
+pending-status filter now fails 2 tests where previously it failed none, because the aggregate's
+matrix check was silently absorbing the error and recording it as a per-order failure rather than
+never selecting the row.
+
+**Current results**, reproducible with one command:
+
+| Invariant broken | Tests failed |
+| --- | --- |
+| Promotion bypasses the transition matrix | 8 |
+| Order currency reverts to "first line wins" | 6 |
+| Customers granted the admin cancellation window | 5 |
+| Ownership scoping removed | 3 |
+| Claim drops the pending-status filter | 2 |
+| Unique-violation translation disabled | 2 |
+| Claim drops the lease guard | 0 (explained above) |
+
+**The lesson, which generalises past this project.** Every earlier entry concluded that a *claim*
+needs a test — layer names, isolation, security properties. This one extends it: **evidence itself
+is a claim with an expiry date.** "We verified X" is a statement about a past state of the code,
+and it decays silently as the code moves. The only durable form is an executable check, which is
+why the audit is a script and why §12.4 now links to it rather than quoting it.
+
+The SDK line was added above the quick-start block in the same pass.
 
 ---
 

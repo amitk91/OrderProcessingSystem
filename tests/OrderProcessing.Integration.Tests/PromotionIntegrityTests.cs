@@ -53,6 +53,45 @@ public sealed class PromotionIntegrityTests(ApiFactory factory)
     }
 
     [Fact]
+    public async Task Claiming_only_ever_returns_orders_that_are_pending()
+    {
+        // The claim's contract, asserted directly. Without this, the only thing
+        // stopping a non-pending order being claimed is the aggregate rejecting the
+        // transition afterwards — which is correct behaviour but records a failure
+        // rather than never selecting the row in the first place.
+        var alice = factory.CreateAliceClient();
+        var admin = factory.CreateAdminClient();
+
+        var pending = await (await alice.CreateOrderAsync(DatabaseSeeder.KeyboardId)).ReadOrderAsync();
+
+        var cancelled = await (await alice.CreateOrderAsync(DatabaseSeeder.MouseId)).ReadOrderAsync();
+        await alice.CancelOrderAsync(cancelled.Id);
+
+        var processing = await (await alice.CreateOrderAsync(DatabaseSeeder.MonitorId)).ReadOrderAsync();
+        await admin.UpdateStatusAsync(processing.Id, "PROCESSING");
+
+        await using var scope = factory.CreateAsyncScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IOrderRepository>();
+        var claimer = scope.ServiceProvider.GetRequiredService<IPendingOrderClaimer>();
+        var dbContext = scope.ServiceProvider.GetRequiredService<OrderProcessingDbContext>();
+
+        await using var transaction = await repository.BeginTransactionAsync();
+        var claimedIds = await claimer.ClaimPendingOrdersAsync(1000);
+
+        claimedIds.ShouldContain(pending.Id);
+        claimedIds.ShouldNotContain(cancelled.Id, "a cancelled order must never be claimed");
+        claimedIds.ShouldNotContain(processing.Id, "an order already processing must never be claimed");
+
+        // Nothing outside Pending, whatever else the shared database holds.
+        var nonPending = await dbContext.Orders
+            .AsNoTracking()
+            .Where(order => claimedIds.Contains(order.Id) && order.Status != OrderStatus.Pending)
+            .CountAsync();
+
+        nonPending.ShouldBe(0);
+    }
+
+    [Fact]
     public async Task A_promotion_never_leaves_a_status_change_without_its_audit_entry()
     {
         // FR-6.5. Before this was transactional, the claim committed the status change
