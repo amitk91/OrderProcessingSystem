@@ -322,7 +322,6 @@ public sealed class OrderServiceTests
                 "Mechanical Keyboard",
                 Money.FromDecimal(49.99m, "USD"),
                 quantity)],
-            "USD",
             Now,
             idempotencyKey);
 }

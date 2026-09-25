@@ -589,6 +589,57 @@ useful question is not "is this true?" but "what else is true if this is?"** Eac
 correct on its own terms and understated on investigation. Treating a finding as a hypothesis to
 test — rather than a defect to patch — is what turned three comments into six fixes.
 
+### Entry 13 — "What if two products have different currencies?"
+
+**Task.** A fourth finding: *"Currency is taken from an arbitrary product.
+`var currency = products[productIds[0]].Currency;` picks the first requested product's currency; if
+a later line differs, `Order.Create` throws a bare `InvalidOperationException` — again a 500 rather
+than a 400. Multi-currency is out of scope, which is fine, but 'what if two products have different
+currencies?'"*
+
+**Why it had gone unnoticed.** Every seeded product is priced in USD, so no test — and no manual
+exercise of the API — could construct a mixed-currency request. The path was unreachable *from the
+data*, not from the code. A catalogue containing a single euro-priced product would have exposed it
+immediately. Seed data that only covers the happy case quietly decides which branches get tested.
+
+**Two problems, one root cause.** The visible defect is the status code. The underlying one is that
+`Order.Create` *accepted* the currency as a parameter, which made "all lines share a currency" a
+precondition the aggregate trusted rather than an invariant it enforced. A caller then had to pick
+one, and picking the first product's made correctness depend on request ordering — the same request
+with its items listed in the other order would have compared against a different baseline.
+
+**Correction.** The currency is now **derived** from the lines: `Order.Create` reads their distinct
+currencies and rejects the order unless there is exactly one. The parameter is gone, so no caller
+can pick arbitrarily. The rejection is a `MixedCurrencyOrderException : DomainException` mapping to
+`422`, naming every currency involved, with the list sorted so the message does not depend on
+request ordering.
+
+An unexpected simplification fell out: the old code checked each line against the order currency
+*inside the item loop*, part-way through building the aggregate. Deriving up front removed that
+check entirely, and with it a path that could throw after items had already been added.
+
+**Auditing the class rather than the instance.** Following the discipline the previous entries
+established, I checked every framework exception the domain and application layers can throw for
+reachability from a well-formed request:
+
+| Exception site | Reachable from a request? | Verdict |
+| --- | --- | --- |
+| Currency mismatch in `Order.Create` | **Yes** | Fixed — now a `DomainException` → 422 |
+| Quantity below one in `OrderItem.Create` | No — `[Range(1,1000)]` rejects it first | Correct as an argument exception |
+| Sub-cent precision in `Money.FromDecimal` | No — prices originate in the catalogue | Correct |
+| Empty-GUID guards | No — the `{id:guid}` route constraint rejects first | Correct |
+| Cross-currency arithmetic in `Money` | Only via the mismatch above | Resolved by the same fix |
+
+The distinction worth keeping: a **business rule a client can violate** belongs in a
+`DomainException` with a real status code; a **programming error** should stay a framework
+exception and produce a 500, because that is what it is. Blanket-mapping `ArgumentException` to
+400 would have been the quick fix and would have masked genuine bugs.
+
+**Verification.** Mutation-tested by restoring "first line wins": **six tests failed** across the
+domain and integration suites. Four new integration tests add a euro-priced product so the
+rejection is observed over HTTP — including one asserting that a consistent non-USD order still
+succeeds, so the fix cannot have over-corrected into rejecting all non-default currencies.
+
 ---
 
 ## Summary

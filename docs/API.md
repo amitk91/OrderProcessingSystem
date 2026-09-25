@@ -463,6 +463,7 @@ Every response of both kinds carries a `correlationId` matching the server logs.
 | `invalid-status-transition` | `409` | Transition not permitted from the current state |
 | `concurrency-conflict` | `409` | The order changed during the request; retry |
 | `product-inactive` | `422` | Product exists but cannot be ordered |
+| `mixed-currency-order` | `422` | Requested items are priced in more than one currency |
 | `idempotency-key-conflict` | `422` | Key reused with a different payload |
 | `write-conflict` | `409` | Two requests contended for the same unique value; retry |
 | `internal-error` | `500` | Unexpected failure. No internal detail is disclosed. |

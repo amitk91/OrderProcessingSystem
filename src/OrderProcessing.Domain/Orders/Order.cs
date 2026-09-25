@@ -99,12 +99,18 @@ public sealed class Order
     /// Product id, snapshot name, catalogue-resolved unit price and quantity. Duplicate
     /// product ids are merged and their quantities summed (FR-1.8).
     /// </param>
+    /// <remarks>
+    /// The order's currency is <em>derived</em> from the lines rather than supplied by
+    /// the caller. Accepting it as a parameter invited a caller to pick one arbitrarily
+    /// — the first product's, say — and have the rest silently disagree. Deriving it
+    /// makes "every line shares one currency" an invariant the aggregate enforces
+    /// rather than a precondition it trusts.
+    /// </remarks>
     public static Order Create(
         Guid id,
         string orderNumber,
         Guid customerId,
         IEnumerable<OrderLine> lines,
-        string currency,
         DateTimeOffset createdAt,
         string? idempotencyKey = null)
     {
@@ -122,17 +128,11 @@ public sealed class Order
             throw new EmptyOrderException();
         }
 
+        var currency = SingleCurrencyOf(merged);
         var order = new Order(id, orderNumber.Trim(), customerId, currency, idempotencyKey, createdAt);
 
         foreach (var line in merged)
         {
-            if (!string.Equals(line.UnitPrice.Currency, currency, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Item '{line.ProductName}' is priced in {line.UnitPrice.Currency} " +
-                    $"but the order is in {currency}.");
-            }
-
             order._items.Add(OrderItem.Create(
                 Guid.CreateVersion7(),
                 line.ProductId,
@@ -227,6 +227,26 @@ public sealed class Order
 
     private void RecalculateTotal() =>
         TotalAmountMinor = _items.Sum(item => item.LineTotalMinor);
+
+    /// <summary>
+    /// Returns the one currency shared by every line, or rejects the order.
+    /// </summary>
+    /// <remarks>
+    /// Sorted so the error message is stable regardless of the order items arrived in —
+    /// an assertion on the message should not depend on request ordering.
+    /// </remarks>
+    private static string SingleCurrencyOf(IReadOnlyCollection<OrderLine> lines)
+    {
+        var currencies = lines
+            .Select(line => line.UnitPrice.Currency)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        return currencies.Count == 1
+            ? currencies[0]
+            : throw new MixedCurrencyOrderException(currencies);
+    }
 
     private static List<OrderLine> MergeDuplicateProducts(IEnumerable<OrderLine> lines) =>
         [.. lines

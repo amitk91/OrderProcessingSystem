@@ -51,7 +51,6 @@ public sealed class OrderTests
                 "ORD-1",
                 Guid.CreateVersion7(),
                 lines: [],
-                "USD",
                 Now));
         }
 
@@ -82,20 +81,88 @@ public sealed class OrderTests
         }
 
         [Fact]
-        public void Items_priced_in_a_different_currency_are_rejected()
+        public void An_order_may_be_placed_in_any_single_currency()
         {
+            // Currency is derived from the lines, so a EUR-only order is perfectly
+            // valid — it is a EUR order. Only mixing is rejected.
             var lines = new[]
             {
-                new OrderLine(Guid.CreateVersion7(), "Euro item", Money.FromDecimal(10m, "EUR"), 1)
+                new OrderLine(Guid.CreateVersion7(), "Euro item", Money.FromDecimal(10m, "EUR"), 2)
             };
 
-            Should.Throw<InvalidOperationException>(() => Order.Create(
+            var order = Order.Create(
                 Guid.CreateVersion7(),
                 "ORD-1",
                 Guid.CreateVersion7(),
                 lines,
-                "USD",
+                Now);
+
+            order.Currency.ShouldBe("EUR");
+            order.TotalAmount.Amount.ShouldBe(20m);
+        }
+
+        [Fact]
+        public void Items_in_different_currencies_are_rejected()
+        {
+            // An order carries one total, so it cannot span currencies. Converting
+            // would need a rate, a rate source and a decision about the spread —
+            // all out of scope, so this is rejected rather than resolved implicitly.
+            var lines = new[]
+            {
+                new OrderLine(Guid.CreateVersion7(), "Dollar item", Money.FromDecimal(10m, "USD"), 1),
+                new OrderLine(Guid.CreateVersion7(), "Euro item", Money.FromDecimal(10m, "EUR"), 1)
+            };
+
+            var exception = Should.Throw<MixedCurrencyOrderException>(() => Order.Create(
+                Guid.CreateVersion7(),
+                "ORD-1",
+                Guid.CreateVersion7(),
+                lines,
                 Now));
+
+            // A DomainException, not a framework one, so it maps to 422 rather than 500.
+            exception.ShouldBeAssignableTo<DomainException>();
+            exception.Currencies.ShouldBe(["EUR", "USD"]);
+            exception.ErrorCode.ShouldBe("mixed-currency-order");
+        }
+
+        [Fact]
+        public void The_mixed_currency_message_does_not_depend_on_item_ordering()
+        {
+            // The currencies are sorted, so the same mismatch reports identically
+            // however the client ordered the request.
+            var usdFirst = new[]
+            {
+                new OrderLine(Guid.CreateVersion7(), "A", Money.FromDecimal(1m, "USD"), 1),
+                new OrderLine(Guid.CreateVersion7(), "B", Money.FromDecimal(1m, "EUR"), 1)
+            };
+
+            var eurFirst = new[]
+            {
+                new OrderLine(Guid.CreateVersion7(), "B", Money.FromDecimal(1m, "EUR"), 1),
+                new OrderLine(Guid.CreateVersion7(), "A", Money.FromDecimal(1m, "USD"), 1)
+            };
+
+            static string MessageFor(OrderLine[] lines) =>
+                Should.Throw<MixedCurrencyOrderException>(() => Order.Create(
+                    Guid.CreateVersion7(), "ORD-1", Guid.CreateVersion7(), lines, Now)).Message;
+
+            MessageFor(usdFirst).ShouldBe(MessageFor(eurFirst));
+        }
+
+        [Fact]
+        public void Three_way_currency_mismatches_report_every_currency_involved()
+        {
+            var lines = new[]
+            {
+                new OrderLine(Guid.CreateVersion7(), "A", Money.FromDecimal(1m, "USD"), 1),
+                new OrderLine(Guid.CreateVersion7(), "B", Money.FromDecimal(1m, "EUR"), 1),
+                new OrderLine(Guid.CreateVersion7(), "C", Money.FromDecimal(1m, "GBP"), 1)
+            };
+
+            Should.Throw<MixedCurrencyOrderException>(() => Order.Create(
+                Guid.CreateVersion7(), "ORD-1", Guid.CreateVersion7(), lines, Now))
+                .Currencies.ShouldBe(["EUR", "GBP", "USD"]);
         }
 
         [Fact]
@@ -112,7 +179,6 @@ public sealed class OrderTests
                 "ORD-1",
                 Guid.CreateVersion7(),
                 lines,
-                "USD",
                 Now));
         }
 

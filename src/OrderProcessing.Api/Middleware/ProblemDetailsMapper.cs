@@ -33,6 +33,13 @@ public static class ProblemDetailsMapper
             ProductInactiveException => (
                 (int)HttpStatusCode.UnprocessableEntity, "Product unavailable", "product-inactive"),
 
+            // 422 as well: valid products, valid quantities, but no single order can
+            // span two currencies and converting is out of scope.
+            MixedCurrencyOrderException => (
+                (int)HttpStatusCode.UnprocessableEntity,
+                "Items must share one currency",
+                "mixed-currency-order"),
+
             IdempotencyKeyConflictException => (
                 (int)HttpStatusCode.UnprocessableEntity,
                 "Idempotency key reused with a different request",

@@ -79,7 +79,6 @@ public sealed class OrderService(
                     await orderNumberGenerator.NextAsync(cancellationToken),
                     command.CustomerId,
                     lines,
-                    lines[0].UnitPrice.Currency,
                     timeProvider.GetUtcNow(),
                     hasIdempotencyKey ? command.IdempotencyKey : null);
 

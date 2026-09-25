@@ -24,7 +24,7 @@ The database is created, migrated and seeded on first run. No configuration, no 
 connection string to set.
 
 ```bash
-dotnet test        # 315 tests, no external dependencies
+dotnet test        # 323 tests, no external dependencies
 ```
 
 To reset everything, delete `src/OrderProcessing.Api/orders.db` and restart.
@@ -173,6 +173,16 @@ do, so the constraint forced a good decision earlier rather than imposing a work
 catalogue. If a price changes later, historical orders still show what the customer actually agreed
 to pay. Recomputing an old total from current prices would be a correctness and compliance defect.
 
+**An order's currency is derived from its lines, not supplied.** `Order.Create` reads the distinct
+currencies of the requested items and rejects the order unless there is exactly one. An earlier
+revision took the currency from whichever product happened to be listed first, which made the
+outcome depend on request ordering and turned a mismatch into a bare `InvalidOperationException` —
+a `500` for a request whose products and quantities were all perfectly valid.
+
+Mixing currencies now returns `422` naming the currencies involved. Multi-currency is out of scope,
+and this is the explicit rejection that scope decision implies rather than an implicit,
+order-dependent one.
+
 ### The background job claims work, then promotes through the aggregate
 
 The brief's one line — *"update PENDING orders to PROCESSING every 5 minutes"* — hides the real
@@ -258,13 +268,13 @@ situation the feature exists to survive.
 
 ## Testing
 
-**315 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
+**323 tests**. The domain and application suites need no I/O at all; the integration suite runs against a real SQLite database.
 
 | Suite | Count | Scope |
 | --- | --- | --- |
-| Domain | 222 | State machine, `Money`, aggregate invariants, clock, **architecture rules** |
+| Domain | 225 | State machine, `Money`, aggregate invariants, clock, **architecture rules** |
 | Application | 21 | Use cases against substituted ports — **no database, no host** |
-| Integration | 72 | Full HTTP stack, security, scheduler, creation races, promotion integrity, error mapping |
+| Integration | 77 | Full HTTP stack, security, scheduler, creation races, promotion integrity, currency, error mapping |
 
 Not the EF Core InMemory provider: it enforces no unique constraints, foreign keys or check
 constraints, so the idempotency and integrity tests would pass there without exercising anything. A
@@ -302,6 +312,7 @@ test in a second instead of a stuck build.
 | `Paging_through_results_yields_no_duplicates_and_no_gaps` | Stable sort under pagination |
 | `Concurrent_requests_with_the_same_idempotency_key_all_return_the_same_order` | 12 racing requests, one order, no 5xx |
 | `Concurrent_creates_without_a_key_produce_distinct_order_numbers` | Order-number collisions retried, not surfaced |
+| `Mixing_currencies_in_one_order_is_rejected_with_422_not_500` | Valid products never yield a server error |
 
 ---
 

@@ -25,6 +25,7 @@ public sealed class ProblemDetailsMappingTests
         { new OrderNotFoundException(Guid.CreateVersion7()), HttpStatusCode.NotFound, "order-not-found" },
         { new ProductNotFoundException(Guid.CreateVersion7()), HttpStatusCode.BadRequest, "product-not-found" },
         { new ProductInactiveException(Guid.CreateVersion7(), "Widget"), HttpStatusCode.UnprocessableEntity, "product-inactive" },
+        { new MixedCurrencyOrderException(["EUR", "USD"]), HttpStatusCode.UnprocessableEntity, "mixed-currency-order" },
         { new IdempotencyKeyConflictException("key"), HttpStatusCode.UnprocessableEntity, "idempotency-key-conflict" },
         { new EmptyOrderException(), HttpStatusCode.BadRequest, "empty-order" },
         { new CancellationReasonRequiredException(), HttpStatusCode.BadRequest, "cancellation-reason-required" },

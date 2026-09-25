@@ -26,7 +26,6 @@ public sealed class TimeProviderTests
             "ORD-2026-000001",
             Guid.CreateVersion7(),
             [new OrderLine(Guid.CreateVersion7(), "Widget", Money.FromDecimal(10m, "USD"), 1)],
-            "USD",
             clock.GetUtcNow());
 
         order.CreatedAt.ShouldBe(new DateTimeOffset(2026, 3, 1, 9, 0, 0, TimeSpan.Zero));
@@ -43,7 +42,6 @@ public sealed class TimeProviderTests
             "ORD-2026-000002",
             Guid.CreateVersion7(),
             [new OrderLine(Guid.CreateVersion7(), "Widget", Money.FromDecimal(10m, "USD"), 1)],
-            "USD",
             clock.GetUtcNow());
 
         // The promotion interval from the brief, simulated instantly.
@@ -89,7 +87,6 @@ public sealed class TimeProviderTests
             "ORD-2026-000003",
             Guid.CreateVersion7(),
             [new OrderLine(Guid.CreateVersion7(), "Widget", Money.FromDecimal(10m, "USD"), 1)],
-            "USD",
             clock.GetUtcNow());
 
         clock.Advance(TimeSpan.FromMinutes(5));

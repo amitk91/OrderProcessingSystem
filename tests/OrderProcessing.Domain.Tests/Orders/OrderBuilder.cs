@@ -79,7 +79,6 @@ internal sealed class OrderBuilder
             _orderNumber,
             _customerId,
             _lines,
-            _currency,
             _createdAt,
             _idempotencyKey);
     }

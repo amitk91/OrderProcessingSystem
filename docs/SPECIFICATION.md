@@ -311,6 +311,17 @@ Rules that follow:
 - Currency is stored alongside every monetary value; arithmetic across differing currencies throws
 - Floating-point types are never used for money anywhere in the system
 
+**An order's currency is derived, not supplied.** `Order.Create` reads the distinct currencies of
+its lines and rejects the order unless there is exactly one. An earlier revision accepted the
+currency as a parameter, and the caller passed the *first requested product's* — so a later line in
+another currency was measured against an arbitrary choice, and the resulting mismatch threw a bare
+`InvalidOperationException` that surfaced as `500`.
+
+Deriving it makes "every line shares one currency" an invariant the aggregate enforces rather than
+a precondition it trusts, and `MixedCurrencyOrderException` is a `DomainException` so it maps to
+`422` with the currencies named. Multi-currency remains out of scope (§1.2); this is the explicit
+rejection that scope decision implies, rather than an implicit and order-dependent one.
+
 ---
 
 ## 6. Order state machine
@@ -393,6 +404,7 @@ Each requirement is phrased to be directly testable.
 | FR-1.3 | Each item must reference an existing, active product, else `400` (or `422`) |
 | FR-1.4 | Quantity must be an integer `≥ 1`; a configurable per-line maximum applies |
 | FR-1.5 | `ProductName` and `UnitPrice` are resolved server-side from the catalog |
+| FR-1.5a | All items must share one currency; a mixed-currency request is rejected with `422` naming the currencies involved. The order's currency is **derived** from its lines, never supplied by the caller |
 | FR-1.6 | Any client-supplied price is **ignored**, never trusted |
 | FR-1.7 | `LineTotal = UnitPrice × Quantity`; `TotalAmount = Σ LineTotal` |
 | FR-1.8 | Duplicate product IDs in one request are merged, summing their quantities |
