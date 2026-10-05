@@ -49,9 +49,9 @@ builder.Services.AddSwaggerGen(options =>
         Description = "Paste the token from POST /api/v1/dev/token."
     });
 
-    options.AddSecurityRequirement(_ => new OpenApiSecurityRequirement
+    options.AddSecurityRequirement(document => new OpenApiSecurityRequirement
     {
-        [new OpenApiSecuritySchemeReference("Bearer")] = []
+        [new OpenApiSecuritySchemeReference("Bearer", document)] = []
     });
 });
 
