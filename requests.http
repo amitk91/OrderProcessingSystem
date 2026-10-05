@@ -4,6 +4,15 @@
 
 @host = http://localhost:5000
 @api = {{host}}/api/v1
+@alice_jwt = {{aliceToken.response.body.token}}
+@bob_jwt = {{bobToken.response.body.token}}
+@admin_jwt = {{adminToken.response.body.token}}
+
+@orderId = {{newOrder.response.body.id}}
+
+@cancelId = {{cancellable.response.body.id}}
+
+@processingId = {{processing.response.body.id}}
 
 ### Seeded identifiers (see DatabaseSeeder)
 @alice = 11111111-1111-1111-1111-111111111111
@@ -38,10 +47,6 @@ Content-Type: application/json
 
 { "userId": "{{admin}}", "role": "Admin", "email": "admin@example.com" }
 
-@alice_jwt = {{aliceToken.response.body.token}}
-@bob_jwt = {{bobToken.response.body.token}}
-@admin_jwt = {{adminToken.response.body.token}}
-
 ###############################################################################
 # 2. Catalogue
 ###############################################################################
@@ -66,8 +71,6 @@ Content-Type: application/json
     { "productId": "{{mouse}}", "quantity": 1 }
   ]
 }
-
-@orderId = {{newOrder.response.body.id}}
 
 ### Price tampering is ignored — unitPrice in the body has no effect (FR-1.6)
 POST {{api}}/orders
@@ -204,7 +207,6 @@ Content-Type: application/json
 
 { "items": [ { "productId": "{{keyboard}}", "quantity": 1 } ] }
 
-@cancelId = {{cancellable.response.body.id}}
 
 ### Customer cancels their own pending order
 POST {{api}}/orders/{{cancelId}}/cancel
@@ -228,7 +230,6 @@ Content-Type: application/json
 
 { "items": [ { "productId": "{{mouse}}", "quantity": 1 } ] }
 
-@processingId = {{processing.response.body.id}}
 
 ###
 PATCH {{api}}/orders/{{processingId}}/status
